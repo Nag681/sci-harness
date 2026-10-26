@@ -1,7 +1,7 @@
 # Online installer for sci-harness, the software-engineer agent skill, on Windows (PowerShell 5.1 or 7).
 #
 #   PowerShell:   irm https://raw.githubusercontent.com/Nag681/sci-harness/main/install.ps1 | iex
-#   cmd.exe:      curl -fsSLo %TEMP%\sci-install.ps1 https://raw.githubusercontent.com/Nag681/sci-harness/main/install.ps1 && powershell -NoProfile -ExecutionPolicy Bypass -File %TEMP%\sci-install.ps1
+#   cmd.exe:      curl -fsSLo %TEMP%\sci.ps1 https://raw.githubusercontent.com/Nag681/sci-harness/main/install.ps1 && powershell -NoProfile -ExecutionPolicy Bypass -File %TEMP%\sci.ps1
 #
 # Options go after the -File path in cmd.exe. In PowerShell, set them first:
 #   $env:SCI_ARGS = "--hooks"; irm https://raw.githubusercontent.com/Nag681/sci-harness/main/install.ps1 | iex

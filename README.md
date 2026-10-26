@@ -37,7 +37,7 @@ irm https://raw.githubusercontent.com/Nag681/sci-harness/main/install.ps1 | iex
 **Windows Command Prompt**
 
 ```bat
-curl -fsSLo %TEMP%\sci-install.ps1 https://raw.githubusercontent.com/Nag681/sci-harness/main/install.ps1 && powershell -NoProfile -ExecutionPolicy Bypass -File %TEMP%\sci-install.ps1
+curl -fsSLo %TEMP%\sci.ps1 https://raw.githubusercontent.com/Nag681/sci-harness/main/install.ps1 && powershell -NoProfile -ExecutionPolicy Bypass -File %TEMP%\sci.ps1
 ```
 
 To read the script before running it, download it first (`curl -fsSLO <url>`, then `sh install.sh`;
