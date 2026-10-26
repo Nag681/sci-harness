@@ -213,6 +213,12 @@ class TestInit(unittest.TestCase):
         self.assertIn("OBJECTIVE: Add an RK2 integrator", p.stdout)
         p = run(".sci\\sci check", shell=True)
         self.assertEqual(p.returncode, 1, p.stdout)
+        p = run(".sci\\sci task show T99", shell=True)
+        self.assertEqual(p.returncode, 2, p.stdout)  # REFUSED
+        p = run(".sci\\sci purge --yes", shell=True)  # deletes the running launcher
+        self.assertEqual(p.returncode, 0, p.stdout)
+        self.assertNotIn("cannot be found", p.stdout)
+        self.assertFalse((sb.root / ".sci").exists())
 
     def test_reinit_keeps_state_and_restores_deleted_state_from_git_backup(self):
         sb = Sandbox(self)

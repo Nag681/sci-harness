@@ -1501,20 +1501,21 @@ exit 127
 """
 
 # For cmd.exe and PowerShell, which find .sci/sci.cmd when told to run .sci/sci. The interpreter that ran
-# `init` comes first. "& exit /b" keeps the exit code and reads nothing more from the file (purge deletes it).
+# `init` comes first. The last line runs sci and exits with an explicit code: a bare `exit /b` makes `cmd /c`
+# (how PowerShell runs .cmd files) report 0, and nothing more is read from the file, which purge deletes.
 SCI_CMD_WRAPPER = "\r\n".join([
     "@echo off",
     "rem sci launcher (generated). Usage: .sci\\sci COMMAND   (see: .sci\\sci help)",
     "setlocal",
     'set "SCI_PY=%s"',
+    'set "SCI_PY_ARG="',
     'if exist "%%SCI_PY%%" goto run',
-    "where py >nul 2>nul",
-    "if errorlevel 1 goto python",
-    'py -3 "%%~dp0sci.py" %%* & exit /b',
-    ":python",
     'set "SCI_PY=python"',
+    "where py >nul 2>nul",
+    'if not errorlevel 1 (set "SCI_PY=py" & set "SCI_PY_ARG=-3")',
     ":run",
-    '"%%SCI_PY%%" "%%~dp0sci.py" %%* & exit /b',
+    '"%%SCI_PY%%" %%SCI_PY_ARG%% "%%~dp0sci.py" %%* & if errorlevel 130 (exit /b 130) else if errorlevel 2 '
+    '(exit /b 2) else if errorlevel 1 (exit /b 1) else if not errorlevel 0 (exit /b 1) else (exit /b 0)',
     ""])
 
 
