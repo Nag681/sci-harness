@@ -13,7 +13,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-NAME = "software-engineer"
+NAME = "sci"
 WINDOWS = os.name == "nt"
 SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", ".sci"}
 POWERSHELLS = [p for p in dict.fromkeys(shutil.which(x) for x in ("powershell", "pwsh")) if p]

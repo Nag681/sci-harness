@@ -1,5 +1,5 @@
 ---
-name: software-engineer
+name: sci
 description: >-
   Durable-memory harness for long-horizon scientific and numerical coding in large codebases
   (simulations, solvers, numerical methods, physics/engineering/climate/bio models, scientific
@@ -15,7 +15,7 @@ compatibility: >-
   OpenCode, pi, Cursor).
 allowed-tools: Bash Read Write Edit Glob Grep
 metadata:
-  version: "3.0.0"
+  version: "3.1.0"
 ---
 
 # Long-horizon scientific coding
@@ -37,8 +37,7 @@ Run every command from the repository root.
 - If it fails with `No such file or directory`, this repo is new to the harness:
   `python3 <this-skill-folder>/scripts/sci.py init --objective "<the user's goal in one line>"`
   (Windows: `py -3` or `python` instead of `python3`. Folder unknown? It is usually
-  `~/.local/share/agent-skills/software-engineer`; otherwise
-  `find ~ -path '*software-engineer/scripts/sci.py' 2>/dev/null | head -1`)
+  `~/.local/share/agent-skills/sci`; otherwise `find ~ -path '*/sci/scripts/sci.py' 2>/dev/null | head -1`)
 - Run `.sci/sci resume` again after any summary or compaction, after finishing a task, whenever
   you are unsure, and at least every ~20 tool calls.
 - Every sci command ends with a `[sci] ... NEXT: ...` line. Read it every time.

@@ -2,6 +2,7 @@
 """Tests for install.py. Each test uses a throwaway HOME and a PATH with stub agent executables."""
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -12,7 +13,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 INSTALL = HERE.parent / "install.py"
 PY = sys.executable
-NAME = "software-engineer"
+NAME = "sci"
 WINDOWS = os.name == "nt"
 MARK = ".sci-install.json"
 
@@ -48,8 +49,8 @@ class Home(object):
         self.home = self.root / "home"
         self.home.mkdir()
 
-    def run(self, *args):
-        p = subprocess.run([PY, str(INSTALL)] + list(args), env=isolated_env(self.home, [self.bin]),
+    def run(self, *args, script=INSTALL):
+        p = subprocess.run([PY, str(script)] + list(args), env=isolated_env(self.home, [self.bin]),
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding="utf-8", errors="replace",
                            timeout=120)
         if p.returncode != 0:
@@ -100,7 +101,7 @@ class TestInstall(unittest.TestCase):
         for rel in (".claude/skills/" + NAME, ".agents/skills/" + NAME):
             h.assert_provides(self, rel)
         plugin = h.p(".gemini/config/plugins/" + NAME)
-        self.assertEqual(json.loads((plugin / "plugin.json").read_text(encoding="utf-8"))["version"], "3.0.0")
+        self.assertEqual(json.loads((plugin / "plugin.json").read_text(encoding="utf-8"))["version"], "3.1.0")
         self.assertTrue((plugin / "skills" / NAME / "SKILL.md").is_file())
         self.assertFalse((plugin / "hooks.json").exists())
         self.assertFalse(h.p(".claude/settings.json").exists())
@@ -206,6 +207,51 @@ class TestInstall(unittest.TestCase):
         self.assertEqual(len(backups), 2, backups)
         self.assertTrue(any(b.startswith("antigravity-plugin-") for b in backups))
         self.assertTrue((old_plugin / MARK).is_file())
+
+    def test_moves_an_install_under_the_old_name(self):
+        h = Home(self)
+        old = "software-engineer"
+        src = h.root / "old-src"  # this repository as it was named before
+        shutil.copytree(str(INSTALL.parent), str(src),
+                        ignore=shutil.ignore_patterns(".git", ".github", ".sci", "tests", "__pycache__"))
+        skill = src / "SKILL.md"
+        skill.write_text(skill.read_text(encoding="utf-8").replace("name: %s\n" % NAME, "name: %s\n" % old, 1),
+                         encoding="utf-8")
+        h.run("--hooks", script=src / "install.py")
+        self.assertIn(old, " ".join(our_commands(h.json(".claude/settings.json")["hooks"])))
+        manual = h.p(".cursor/skills/" + old)  # copied by hand: only pointed out
+        shutil.copytree(str(src), str(manual))
+        other = h.p(".gemini/skills/" + old)  # someone else's skill with that name: left alone
+        other.mkdir(parents=True)
+        (other / "SKILL.md").write_text("---\nname: %s\n---\n" % old)
+
+        h.run("--only", "claude")
+        self.assertFalse(os.path.lexists(str(h.p(".claude/skills/" + old))))
+        h.assert_provides(self, ".claude/skills/" + NAME)
+        self.assertNotIn(old, " ".join(our_commands(h.json(".claude/settings.json")["hooks"])))
+        self.assertTrue(h.p(".agents/skills/%s/SKILL.md" % old).is_file())  # the other agents keep working
+        self.assertIn(old, " ".join(our_commands(h.json(".codex/hooks.json")["hooks"])))
+
+        out = h.run()
+        for rel in (".agents/skills/" + old, ".gemini/config/plugins/" + old, ".local/share/agent-skills/" + old):
+            self.assertFalse(os.path.lexists(str(h.p(rel))), rel)
+        for rel in (".claude/skills/" + NAME, ".agents/skills/" + NAME):
+            h.assert_provides(self, rel)
+        self.assertTrue(h.p(".gemini/config/plugins/%s/hooks.json" % NAME).is_file())  # hooks stay on
+        for rel in (".claude/settings.json", ".codex/hooks.json", ".gemini/settings.json"):
+            cmds = our_commands(h.json(rel)["hooks"])
+            self.assertEqual(len(cmds), 3, rel)
+            self.assertNotIn(old, " ".join(cmds), rel)
+        notes = re.findall(r"note: (\S+) holds an older copy", out)
+        self.assertEqual(len(notes), 1, out)
+        self.assertIn("cursor", notes[0])
+        self.assertFalse(h.p(".local/share/agent-skills/backups").exists())  # nothing of ours is backed up
+        self.assertIn("old name %s" % old, h.run("--status"))
+
+        h.run("--uninstall")
+        self.assertTrue((manual / "SKILL.md").is_file())
+        self.assertTrue((other / "SKILL.md").is_file())
+        self.assertFalse(os.path.lexists(str(h.p(".claude/skills/" + NAME))))
 
     def test_copy_mode_and_project(self):
         h = Home(self, agents=("claude",))

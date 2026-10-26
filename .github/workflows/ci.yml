@@ -62,9 +62,9 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           curl -fsSL "$RAW/install.sh" | sh -s -- --only claude,gemini
-          test -f ~/.claude/skills/software-engineer/SKILL.md
-          test -f ~/.agents/skills/software-engineer/SKILL.md
-          python3 ~/.local/share/agent-skills/software-engineer/install.py --status
+          test -f ~/.claude/skills/sci/SKILL.md
+          test -f ~/.agents/skills/sci/SKILL.md
+          python3 ~/.local/share/agent-skills/sci/install.py --status
 
       - name: the installed skill works (bash)
         if: runner.os != 'Windows'
@@ -72,7 +72,7 @@ jobs:
           cd "$(mktemp -d)"
           git -c init.defaultBranch=main init -q
           git -c user.name=ci -c user.email=ci@example.com commit -q --allow-empty -m init
-          python3 ~/.local/share/agent-skills/software-engineer/scripts/sci.py init --objective "smoke test"
+          python3 ~/.local/share/agent-skills/sci/scripts/sci.py init --objective "smoke test"
           .sci/sci task add "smoke" --verify "python3 -c 'print(42)'" --scope x
           .sci/sci task start
           .sci/sci check
@@ -82,8 +82,8 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           curl -fsSL "$RAW/install.sh" | sh -s -- --uninstall
-          test ! -e ~/.claude/skills/software-engineer
-          test ! -e ~/.local/share/agent-skills/software-engineer
+          test ! -e ~/.claude/skills/sci
+          test ! -e ~/.local/share/agent-skills/sci
 
       - name: irm | iex (Windows PowerShell 5.1)
         if: runner.os == 'Windows'
@@ -91,8 +91,8 @@ jobs:
         run: |
           $env:SCI_ARGS = '--only claude,gemini'
           irm "$env:RAW/install.ps1" | iex
-          if (-not (Test-Path "$HOME\.claude\skills\software-engineer\SKILL.md")) { throw 'claude skill missing' }
-          if (-not (Test-Path "$HOME\.agents\skills\software-engineer\SKILL.md")) { throw 'agents skill missing' }
+          if (-not (Test-Path "$HOME\.claude\skills\sci\SKILL.md")) { throw 'claude skill missing' }
+          if (-not (Test-Path "$HOME\.agents\skills\sci\SKILL.md")) { throw 'agents skill missing' }
 
       - name: the installed skill works (PowerShell, cmd.exe, Git Bash)
         if: runner.os == 'Windows'
@@ -103,7 +103,7 @@ jobs:
           Set-Location $repo
           git -c init.defaultBranch=main init -q
           git -c user.name=ci -c user.email=ci@example.com commit -q --allow-empty -m init
-          python "$HOME\.local\share\agent-skills\software-engineer\scripts\sci.py" init --objective "smoke test"
+          python "$HOME\.local\share\agent-skills\sci\scripts\sci.py" init --objective "smoke test"
           if ($LASTEXITCODE -ne 0) { throw 'init failed' }
           .sci/sci task add smoke --verify "python -c 'print(42)'" --scope x
           .sci/sci task start
@@ -130,4 +130,4 @@ jobs:
         shell: pwsh
         run: |
           & ([scriptblock]::Create((irm "$env:RAW/install.ps1"))) --uninstall
-          if (Test-Path "$HOME\.claude\skills\software-engineer") { throw 'still installed' }
+          if (Test-Path "$HOME\.claude\skills\sci") { throw 'still installed' }

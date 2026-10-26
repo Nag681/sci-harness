@@ -1,6 +1,6 @@
 <div align="center">
 
-# sci-harness
+# Sci-Harness
 
 **Keeps small, inexpensive coding models on track in long scientific coding tasks.**
 
@@ -10,16 +10,18 @@
 [![No dependencies](https://img.shields.io/badge/dependencies-none-2ea44f)](scripts/sci.py)
 [![MIT license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-[Install](#install) · [Quick start](#quick-start) · [See it work](#see-it-work) · [What it fixes](#what-it-fixes) · [How it works](#how-it-works) · [FAQ](#faq)
+[Install](#install) · [How to use it](#how-to-use-it) · [Example](#example-splitting-a-bill) · [How it works](#how-it-works) · [FAQ](#faq)
 
 </div>
 
 <br>
 
-An [Agent Skill](https://agentskills.io) named `software-engineer` for **Claude Code, Codex CLI, Gemini CLI,
-Antigravity, OpenCode and pi**. It gives the agent a plan that lives on disk, acceptance tests it can't weaken,
-checks on the numbers and an undo that never loses work, so long tasks survive context compaction and
-small-model mistakes.
+AI coding agents forget the plan when their memory fills up. They "fix" a failing test by making the test easier,
+and when they're stuck they keep guessing. Small models do this the most.
+
+Sci-Harness gives your agent an [Agent Skill](https://agentskills.io) called **`sci`**. It brings a notebook that
+survives memory loss, a referee that runs the tests and refuses shortcuts, and a short rulebook. It works with
+**Claude Code, Codex CLI, Gemini CLI, Antigravity, OpenCode and pi**.
 
 ## Install
 
@@ -46,58 +48,81 @@ curl -fsSLo %TEMP%\sci.ps1 https://raw.githubusercontent.com/Nag681/sci-harness/
 > Run the same command again to update. For flags such as `--hooks` or `--uninstall`, see
 > [install options](#install-options).
 
-## Quick start
+## How to use it
 
-1. **Open your agent** in the repository you want to change.
-2. **Name the skill and the goal**, for example:
-   *"Use the software-engineer skill to add an RK2 integrator to the orbit solver."*
-   In Claude Code you can also type `/software-engineer`.
-3. **Let it work.** The agent splits the goal into small tasks. For each one it writes a failing test, locks
-   it, makes it pass and commits ([step by step](#step-by-step)).
+1. **Install it** with the command above, then restart your agent.
+2. **Open your agent in your project folder.** The project has to be a git repository. If it isn't one yet, run
+   `git init && git add -A && git commit -m start` first.
+3. **Say what you want and name the skill.** In Claude Code, type `/sci add a tip option to the bill splitter`.
+   In any agent, you can write *"Use the sci skill to add a tip option to the bill splitter."*
+4. **Let it work.** The agent plans small tasks and finishes them one at a time. Each finished task becomes its
+   own git commit, so you can always see what changed and why.
+5. **Answer its questions.** When something is unclear (units, rules, what you meant), the agent parks that task,
+   carries on with the others and asks you.
+6. **Read the report at the end.** It lists what was done, the causes of bugs it found and everything you should
+   look over.
 
-Check in whenever you like:
+> [!TIP]
+> You don't need to learn any `.sci/sci` commands, because the agent runs them itself. These are for peeking in:
+>
+> | You want to… | Run |
+> | --- | --- |
+> | see where things stand and what comes next | `.sci/sci resume` |
+> | get the summary and the list of things to look over | `.sci/sci report` |
+> | see only what needs your review | `.sci/sci review` |
+> | answer a question the agent parked | `.sci/sci task unblock T3 --answer "..."` |
+> | pause the harness in this project, and resume it | `.sci/sci pause` / `.sci/sci unpause` |
 
-| Command | What you get |
-| --- | --- |
-| `.sci/sci resume` | where things stand and the next step |
-| `.sci/sci report` | a summary, plus everything that needs your review |
-| `.sci/sci review` | what to look over: unlocked tests, spec and scope changes, golden updates |
-| `.sci/sci task unblock T3 --answer "..."` | an answer to a question the agent parked for you |
-| `.sci/sci pause` / `unpause` | a quiet harness in this repo, and back |
+## Example: splitting a bill
 
-## See it work
+Say you have a tiny app that splits a restaurant bill between friends, and you type:
 
-After a context compaction, one command puts the agent back on track:
+> `/sci add a tip option to the bill splitter`
 
-```console
-$ .sci/sci resume
-=== .sci/sci resume | session 2 | sci/rk2 @ baf57490 | 4 changed/untracked files | sci 3.0.0 ===
-OBJECTIVE: Add an RK2 integrator to the orbit solver
-PROGRESS: 0/2 done, 0 blocked, 1 todo
-  [>] T1 RK2 step with second-order convergence  <- ACTIVE
-  [ ] T2 Use RK2 in the orbit propagator
-ACTIVE T1: RK2 step with second-order convergence
-  verify: python3 -m unittest tests.test_rk2 -q
-  scope : orbits/integrators.py, tests/test_rk2.py
-  invariants: observed order 2 +/- 0.2
-  locked: tests/test_rk2.py
-  last check: FAIL 0s ago | strikes 1/3 | verify: never
-  failing: tests.test_rk2.TestRK2.test_second_order
-BASELINE: 0 known pre-existing failures (not your job unless a task says so)
-NEXT: Fix the code (not the tests), then `.sci/sci check`. Strike 1/3.
-```
+Everything quoted below is real sci output from this exact example (sometimes shortened).
 
-After three failed fixes in a row, it stops the guessing:
+### 1. A plan before any code
+
+- **Notes:** the agent writes down what it learns, such as *"split() rounds each share to cents"*.
+- **Saved numbers:** it records what the app computes today. `split(100, 3)` gives `[33.33, 33.33, 33.33]`.
+  If a later change moves these numbers, sci notices.
+- **Baseline:** it runs your tests once. From then on, only *new* failures count against the agent.
+- **Tasks:** it splits the job into small tasks. Each task gets a test that proves it's done and a list of files
+  it may change:
+  - **T1** *Add a tip option to split()*. It may change `bill.py` and `test_tip.py`.
+  - **T2** *Show the tip on the receipt*. It waits for T1.
+
+### 2. Task T1, step by step
+
+| | The agent… | sci says… |
+| :---: | --- | --- |
+| 1 | writes the test first: *"$100 plus a 15% tip, split 3 ways, must add up to $115.00"*, then runs `check` | ❌ **FAIL**: `split()` has no tip yet. That's the point: a test that passes before the work starts proves nothing. |
+| 2 | runs `lock` | 🔒 The test is frozen. If anyone edits it from now on, every check fails. The agent can't make the exam easier. |
+| 3 | rounds each share to cents: 3 × $38.33 | ❌ $114.99, a cent short. **Strike 1.** The attempt is saved, so no work is ever lost. |
+| 4 | rounds up instead: 3 × $38.34 | ❌ $115.02. **Strike 2.** |
+| 5 | switches to exact decimal math | ❌ $114.99 again. **Strike 3: 🛑 STOP.** No more code edits until the cause is found. |
+| 6 | writes two guesses. **H1:** computer math is inexact. **H2:** rounding every share loses the leftover cent. | Test them with experiments, not fixes. |
+| 7 | runs a 5-line experiment: even exact math gives $114.99 | H1 is ruled out and H2 is confirmed. The STOP lifts. |
+| 8 | gives the leftover cent to the first person: $38.34 + $38.33 + $38.33 | ✅ **PASS** |
+| 9 | runs `verify` to check everything | ⚠️ The saved numbers moved: `split(100, 3)` now starts with 33.34 instead of 33.33. |
+| 10 | explains why: *"the old shares lost a cent (3 × 33.33 = 99.99)"* | The new numbers are saved, and the change goes on **your review list**. |
+| 11 | runs `verify` again | ✅ The test, the saved numbers and the whole test suite all **PASS**. |
+| 12 | runs `done` | 📦 Only `bill.py` and `test_tip.py` are committed, as `[T1]`. From now on, the test is protected. |
+
+<details>
+<summary><b>Real output: the third failed fix, and the STOP</b></summary>
 
 ```console
 $ .sci/sci check
 !!! STOP is active for T1 (details at the end of this output).
-FAIL check T1: exit 1 in 0.1s | log .sci/runs/0005-check-T1.log
-  $ python3 -m unittest tests.test_rk2 -q
+FAIL check T1: exit 1 in 0.1s | log .sci/runs/0007-check-T1.log
+  $ python3 -m unittest test_tip -q
   summary: Ran 1 test in 0.000s | FAILED (failures=1)
-  failing (1): tests.test_rk2.TestRK2.test_second_order
+  failing (1): test_tip.TestTip.test_shares_add_up_to_bill_plus_tip
   ...
-Attempt saved: .sci/attempts/T1-strike3-1793030073.patch
+  | AssertionError: 114.99 != 115.0 within 2 places (0.010000000000005116 difference)
+  ...
+Attempt saved: .sci/attempts/T1-strike3-1793033586.patch
 !!! STOP: 3 failed fix attempts in a row. Do NOT edit code now.
 !!! 1) .sci/sci hyp add "<specific, testable cause>"  (at least 2 hypotheses)
 !!! 2) test each with a tiny experiment (print/probe/script in .sci/scratch), not a code fix
@@ -105,177 +130,263 @@ Attempt saved: .sci/attempts/T1-strike3-1793030073.patch
 !!! Then fix only the confirmed cause. Undo bad edits with: .sci/sci restore
 ```
 
+</details>
+
+<details>
+<summary><b>Real output: the experiment that found the cause</b></summary>
+
+```console
+$ .sci/sci run 'python3 .sci/scratch/probe.py'
+run 8: exit 0 in 0.0s | log .sci/runs/0008-run-T1.log
+  | exact total: 115.00 | each: 38.33 | 3 shares: 114.99
+  | in cents: 11500 / 3 = (3833, 1)
+$ .sci/sci hyp refute H1 'run 8: with exact decimal math the 3 shares still add up to 114.99'
+H1 refuted.
+STOP cleared: strikes reset. Fix only what the evidence supports.
+```
+
+</details>
+
+<details>
+<summary><b>Real output: verify notices the changed numbers</b></summary>
+
+```console
+$ .sci/sci verify
+PASS task T1: exit 0 in 0.1s | log .sci/runs/0010-verify-T1.log
+FAIL golden shares: 1/3 numbers outside tolerance; max abs err 0.01, max rel err 0.0003 | log .sci/runs/0011-golden-shares.log
+  value #0: reference 33.33, now 33.34
+  If this change of numbers is intended (better scheme, bug fix), justify it: .sci/sci golden update shares --reason "..."
+VERIFY FAIL
+```
+
+</details>
+
+### 3. If the agent's memory gets wiped halfway
+
+Long sessions fill up the agent's memory, and older parts get summarized away. Suppose that happens right after
+strike 1. One command brings everything back:
+
+```console
+$ .sci/sci resume
+=== .sci/sci resume | session 2 | sci/tip @ 8a49ced3 | 2 changed/untracked files | sci 3.1.0 ===
+OBJECTIVE: Add a tip option to the bill splitter
+PROGRESS: 0/2 done, 0 blocked, 1 todo
+  [>] T1 Add a tip option to split()  <- ACTIVE
+  [ ] T2 Show the tip on the receipt
+ACTIVE T1: Add a tip option to split()
+  verify: python3 -m unittest test_tip -q
+  scope : bill.py, test_tip.py
+  invariants: the shares add up to the bill plus tip
+  locked: test_tip.py
+  last check: FAIL 0s ago | strikes 1/3 | verify: never
+  failing: test_tip.TestTip.test_shares_add_up_to_bill_plus_tip
+NOTES (1; all in .sci/HANDOFF.md):
+  N1 [code] split() rounds each share to cents: bill.py:6
+GOLDENS: shares OK
+BASELINE: 0 known pre-existing failures (not your job unless a task says so)
+NEXT: Fix the code (not the tests), then `.sci/sci check`. Strike 1/3.
+```
+
+### 4. T2, and the report
+
+T2 goes through the same loop. Its `verify` also reruns T1's test, so work on the receipt can't quietly break
+the tip math. When every task is done, you get one commit per task and a report:
+
+```console
+$ git log --oneline
+5d3cdf9 feat: show the tip on the receipt [T2]
+61dd251 feat: tip option for split() [T1]
+8a49ced bill splitter
+
+$ .sci/sci report
+Objective: Add a tip option to the bill splitter
+Tasks: 2/2 done, 0 blocked, 0 todo
+
+- T1 [done] Add a tip option to split() (commit 61dd251085)
+- T2 [done] Show the tip on the receipt (commit 5d3cdf98cf)
+
+Last verify: PASS 0s ago
+Goldens: shares OK
+
+Root causes found:
+- H2: the cent goes missing because every share is rounded to 38.33 and nobody pays the leftover cent (run 8: 11500 cents / 3 people = 3833 each with 1 cent left over)
+
+NEEDS YOUR REVIEW:
+- [golden-update] T1: shares re-recorded: the old shares lost a cent (3 x 33.33 = 99.99); now they add up to 100.00
+```
+
+And the app:
+
+```console
+$ python3 -c 'from bill import receipt; print(receipt(100, 3, tip=0.15))'
+Bill:  $100.00
+Tip:   $15.00 (15%)
+Total: $115.00
+Each:  $38.34, $38.33, $38.33
+```
+
 ## What it fixes
 
-| Small models tend to… | sci-harness… |
+| Small models tend to… | Sci-Harness… |
 | --- | --- |
-| 🧠 lose the plan when the context is compacted | keeps the plan, notes and progress in `.sci/`; every command ends with `NEXT:` |
-| 🧪 "fix" a failing test by weakening it | locks acceptance tests and flags loosened tolerances, removed asserts and skips |
-| 🔢 change results silently | re-checks golden outputs and every finished task on each `verify` |
-| 🔁 loop on random edits | stops after 3 failed fixes until hypotheses are tested |
-| 🧹 wipe work with git | saves each attempt before undoing; optional hooks block `git reset --hard` |
-| 📜 drown in output | caps what the agent sees; full logs stay in `.sci/runs/` |
+| 🧠 lose the plan when their memory fills up | keeps the plan, notes and progress in `.sci/`, and every step ends with `NEXT:` |
+| 🧪 "fix" a failing test by weakening it | locks tests and catches loosened tolerances, removed asserts and skips |
+| 🔢 change results without noticing | rechecks the saved numbers and every finished task on each `verify` |
+| 🔁 loop on random edits | stops them after 3 failed fixes until the cause is tested |
+| 🧹 wipe work with git | saves each attempt before any undo; optional hooks block `git reset --hard` |
+| 📜 drown in output | shows the agent a short summary and keeps full logs in `.sci/runs/` |
 
 ## How it works
 
-sci-harness has three parts:
+### The big picture
+
+Sci-Harness has three parts:
 
 | Part | What it is | Its job |
 | --- | --- | --- |
 | 📓 **Notebook** | the `.sci/` folder in your project | remembers the goal, the tasks, every result and everything learned, even after the agent's memory is wiped |
-| ⚖️ **Referee** | the program `.sci/sci` | runs the tests, records the results, refuses shortcuts and ends every answer with a `NEXT:` step |
+| ⚖️ **Referee** | the program `.sci/sci` | runs the tests, records the results, refuses shortcuts and ends each answer with a `NEXT:` step |
 | 📋 **Rulebook** | [`SKILL.md`](SKILL.md) | tells the agent to trust the referee over its own memory, never to weaken a test, and to stop guessing after 3 failed fixes |
 
-The agent writes the code; sci never does. It checks, records and, when asked, undoes. Optional
-[hooks](#reference) (off by default) also repeat a short reminder of the plan every turn and block git
-commands that destroy work.
+```mermaid
+flowchart LR
+    you(["🙂 You"]) -- "ask for a feature" --> agent["🤖 Your agent"]
+    agent -- "follows" --> rules["📋 SKILL.md<br>the rulebook"]
+    agent -- "edits" --> code["📁 Your code and tests"]
+    agent -- "runs .sci/sci" --> sci["⚖️ sci.py<br>the referee"]
+    sci -- "runs the tests" --> code
+    sci -- "reads and writes" --> notes["📓 .sci/<br>the notebook"]
+    sci -- "snapshots and commits" --> git["🗂️ git"]
+    sci -.->|"PASS or FAIL, plus NEXT"| agent
+```
+
+The agent writes all the code; sci never does. It checks, records and, when asked, undoes. Optional
+[hooks](#reference) (off by default) also repeat a short reminder of the plan every turn and block git commands
+that destroy work.
+
+### What happens when the agent runs a command
+
+Take `.sci/sci check`, which the agent runs after every small edit:
+
+```mermaid
+sequenceDiagram
+    participant A as 🤖 Agent
+    participant S as ⚖️ .sci/sci
+    participant N as 📓 .sci/ notebook
+    participant T as 🧪 Your tests
+    A->>S: check
+    S->>N: read the plan
+    S->>S: snapshot every file, check the guard
+    S->>T: run the task's test
+    T-->>S: pass or fail
+    S->>N: save the result, the strike count and a patch or restore point
+    S-->>A: PASS or FAIL, plus the NEXT step
+```
+
+The full test output goes to `.sci/runs/`. The agent sees only a short summary, so its memory doesn't fill up
+with logs.
+
+### The loop, for every task
 
 ```mermaid
 flowchart TD
-    A(["init: set up .sci/"]) --> B["plan: notes, goldens, baseline, 3-12 tasks"]
+    A(["init: create .sci/"]) --> B["plan: notes, saved numbers, baseline, 3-12 tasks"]
     B --> C["start the next task"]
-    C --> D["write the acceptance test"]
+    C --> D["write the test"]
     D --> E{"check"}
     E -- "FAIL: feature missing" --> F["lock the test"]
-    E -- "PASS: pure refactor" --> F
+    E -- "PASS: pure clean-up" --> F
     F --> G["edit the code"]
     G --> H{"check"}
     H -- "FAIL" --> K["strike, attempt saved"]
     K -- "strike 1 or 2" --> G
-    K -- "strike 3" --> S["STOP: hypotheses and experiments"]
+    K -- "strike 3" --> S["STOP: guesses and experiments"]
     S --> G
     K -- "strike 3, second time" --> X["ESCALATE: start over or ask you"]
     H -- "PASS" --> V{"verify"}
     V -- "FAIL" --> G
-    V -- "PASS" --> Z["done: commit, protect the tests"]
+    V -- "PASS" --> Z["done: commit, protect the test"]
     Z --> C
 ```
 
-### Step by step
+### The rules sci enforces
 
-The running example: the goal is *"Add an RK2 integrator to the orbit solver"*. RK2 is a more accurate way to move
-a simulation forward in time than the simple Euler method the code uses now. Every command below is run as
-`.sci/sci <command>` from the repository root.
-
-1. **Set up** (once per project): `python3 <skill folder>/scripts/sci.py init --objective "..."`
-   - sci creates `.sci/` and tells git to ignore it, so it is never committed.
-   - It finds your test command (for example `pytest`) and saves a map of the code.
-   - On `main`, it suggests a separate git branch.
-
-2. **Plan** (before any code changes)
-   - The agent explores the code (`map`, `find`) and writes facts down, for example
-     `note "positions are in metres, time in seconds"`.
-   - **Goldens:** it saves the numbers the program prints today, such as the final orbit position. Later, sci
-     reruns that command and compares every number to about 12 significant digits, so a change in the results
-     never goes unnoticed.
-   - **Baseline:** it runs your test suite once and records which tests already fail. From then on, only *new*
-     failures count against the agent.
-   - **Tasks:** it splits the goal into 3–12 small tasks. Each task gets a *verify command* (one command that
-     passes only when the task is done), a *scope* (the files it may change), optional *invariants* (facts that
-     must stay true, like "energy is conserved") and optional *dependencies* (T2 waits for T1).
-
-3. **Start a task**: `task start`
-   - sci picks the first task whose dependencies are done and takes a snapshot of every file: the task's start
-     point.
-
-4. **Write a failing test first**: `check`
-   - The agent writes the *acceptance test*, the test that proves the task works, and runs `check`.
-   - For a new feature the result must be **FAIL**: the feature doesn't exist yet, and a test that already passes
-     proves nothing. For a pure clean-up that shouldn't change behavior, PASS is expected.
-
-5. **Lock the test**: `lock`
-   - sci saves a fingerprint and a copy of the test file. If that file changes in any way, every later check
-     counts as FAIL, even when the tests pass. The agent can't make the exam easier.
-   - If the test itself is wrong, the agent must `unlock` it with a written reason, and that always lands on
-     your review list.
-
-6. **Fix the code in small steps**: edit, `check`, edit, `check`, …
-   - **PASS:** sci saves the files as a restore point and resets the strike counter.
-   - **FAIL after a code change:** one *strike*, and the attempt is saved as a patch in `.sci/attempts/`, so no
-     work is ever lost. Failures before the lock, or rerunning without changing anything, don't count.
-   - sci warns when the change grows past 400 lines or touches files outside the task's scope.
-   - `restore` undoes: back to the last PASS, or to the task's start. It saves the current version as a patch
-     first and always puts locked tests back exactly.
-
-7. **Stuck? STOP and think** (after 3 strikes in a row)
-   - sci prints **STOP**: no more code edits. The agent writes at least two possible causes (`hyp add`), tests
-     each with a small experiment (`run`), and marks them refuted or confirmed with the evidence.
-   - STOP lifts once there are two new hypotheses and at least one has been tested, or when a check passes.
-   - If 3 more fixes fail after that (6 in all), sci says **ESCALATE**: start the task over with a different
-     approach, or block it and ask you.
-   - Refuted causes appear as *RULED OUT* in every later briefing, so the agent never retries a dead end.
-
-8. **Check everything**: `verify` runs these in order and stops at the first failure:
-   1. the guard: the locked test is untouched, tests from finished tasks are untouched, no other test was
-      weakened (an added skip, a deleted assert, a looser tolerance, a changed expected number, an `assert True`),
-      and nobody edited the task list by hand
-   2. the build, for compiled code
-   3. this task's verify command
-   4. the verify command of every finished task, so new work can't break old work (a *regression*)
-   5. every golden
-   6. the whole test suite, compared with the baseline
-
-   sci remembers exactly which file contents passed. `verify --quick` runs only the first three steps.
-
-9. **Finish**: `done -m "summary"`
-   - sci refuses unless the full verify passed on exactly the current files (edit anything afterwards and you
-     verify again), the test is locked, nothing changed outside the scope and no debugger statements are left.
-     A justified change outside the scope is allowed, but it lands on your review list.
-   - Then it commits only this task's files, tagged `[T1]`, and the task's tests become *protected*: every later
-     task is checked against them.
-
-10. **Repeat, and recover at any time**
-    - `NEXT:` names the next task. After a memory wipe, `resume` prints the goal, the task list, the active task,
-      the last result, ruled-out causes, notes and the next step. `.sci/HANDOFF.md` holds the same in a readable
-      form.
-    - When every task is done: a final `verify`, then `report` for you, with everything that needs your review.
+| Rule | In plain words |
+| --- | --- |
+| 🧪 **Test first** | For a new feature, the first `check` must FAIL. For a clean-up that shouldn't change behavior, it must PASS. |
+| 🔒 **Lock** | `lock` saves a fingerprint and a copy of the test files. Any change to them makes every check FAIL, even when the tests pass. Only `unlock` with a written reason frees them, and that goes on your review list. |
+| ❌ **Strikes** | A strike is a failed check after a code change, once the test is locked. Failures before the lock, or reruns without changes, don't count. A PASS resets the count. Each strike saves the attempt as a patch in `.sci/attempts/`. |
+| 🛑 **STOP** | At 3 strikes in a row, the agent must stop editing code. The STOP lifts once the agent has written 2 new guesses (*hypotheses*) and tested at least one, or when a check passes. |
+| 🚨 **ESCALATE** | If the agent hits 3 strikes again after a STOP (6 failed fixes), it starts the task over a different way or asks you. Every guess it ruled out stays listed, so it never retries a dead end. |
+| 🛡️ **Guard** | Every check and verify confirms four things. The locked test is untouched. Finished tasks' tests are untouched. No test was weakened: no new skip, no deleted assert, no `assert True`, no looser tolerance, no changed expected number. And nobody edited the plan by hand. Breaking any of these counts as a FAIL. |
+| ✅ **Verify** | Runs these in order and stops at the first failure: the guard, then the build (for compiled code), this task's test, every finished task's test, the saved numbers (compared to about 12 digits) and finally the whole test suite (only new failures count). `verify --quick` runs only the first three. |
+| 📦 **Done** | Refuses until the full verify has passed on exactly the current files, the test is locked, nothing outside the task's files has changed, no stray new files are left and no debugger lines remain. A justified exception goes on your review list. Then `done` commits only this task's files as `[T1]`, and its tests become protected for every later task. |
+| ↩️ **Restore** | Undo, back to the last PASS or to the task's start. It saves the current version as a patch first and always puts locked tests back exactly. |
 
 ### How sci picks the next step
 
-Every command ends with a `NEXT:` line. sci takes the first row that applies:
+After each step, sci prints a `NEXT:` line. It takes the first row that applies:
 
 | Situation | `NEXT:` tells the agent to… |
 | --- | --- |
 | the harness is paused | wait (`.sci/sci unpause` resumes) |
-| no goal yet | set the objective |
-| no tasks yet | explore, add 3–12 tasks and record the baseline |
-| STOP is active | write and test hypotheses (ESCALATE on the second STOP) |
-| a locked or protected test was changed | undo that change |
-| the test isn't locked yet | write the acceptance test, `check`, then `lock` |
+| no goal yet | set the goal |
+| no tasks yet | explore the code, add 3–12 tasks and record the baseline |
+| STOP is active | write and test guesses (ESCALATE on the second STOP) |
+| a guard rule was broken | undo that change |
+| the test isn't locked yet | write the test, `check`, then `lock` |
+| verify found changed saved numbers | fix the code, or explain the change with `golden update`, then `verify` again |
 | the last check failed | fix the code, not the tests (strike n/3) |
-| the checks pass | run `verify` (again, if files changed since) |
+| the checks pass | run `verify` (again if files changed since) |
 | verified | run `done` |
 | no task is active | start the next task whose dependencies are done |
 | every task is done | run a final `verify`, then `report` |
 | only blocked tasks are left | ask you their questions |
 
-### What's inside `.sci/`
+### What's where
+
+**On your computer, installed once:** `~/.local/share/agent-skills/sci/`
+
+| File | What it is |
+| --- | --- |
+| [`SKILL.md`](SKILL.md) | the rulebook your agent reads |
+| [`scripts/sci.py`](scripts/sci.py) | the referee: one Python file, no dependencies |
+| [`scripts/sci_hook.py`](scripts/sci_hook.py) | the optional hooks |
+| [`references/`](references/) | guides the agent opens when it needs them: test recipes, debugging, a [complete example session](references/worked-example.md) |
+| [`install.py`](install.py) | the installer (`--status`, `--uninstall`, …) |
+
+**In each project:** `.sci/`
 
 | Path | Holds |
 | --- | --- |
-| `state.json` | the plan: goal, tasks, locks, hypotheses, notes, goldens |
+| `sci`, `sci.py` | the referee, copied in by `init` so the project keeps working on its own |
+| `state.json` | the plan: goal, tasks, locks, guesses, notes, saved numbers |
+| `config.json` | settings, such as your test command |
 | `HANDOFF.md` | a readable summary, rewritten after every change |
 | `events.jsonl` | a diary of everything that happened |
 | `runs/` | the full output of every command sci ran |
 | `attempts/` | failed and undone attempts, as patches |
-| `golden/` | the saved reference numbers |
-| `scratch/` | the agent's experiments (never committed) |
+| `golden/` | the saved numbers |
+| `scratch/` | the agent's experiments |
 
 `.sci/` is listed in `.git/info/exclude`, so it never lands in a commit. sci also keeps a backup of the plan and
-settings inside `.git/`: if `.sci/` gets deleted, running `init` again brings them back.
+settings inside `.git/`. If `.sci/` gets deleted, running `init` again brings them back.
 
 <details>
-<summary><b>Words used above</b></summary>
+<summary><b>Words used on this page</b></summary>
 
 | Word | Meaning |
 | --- | --- |
 | agent | an AI that edits code and runs commands for you (Claude Code, Codex, …) |
-| context compaction | an agent can only see so much text at once; in a long session, older parts get summarized and details are lost |
-| acceptance test | the test that proves a task is done |
+| skill | a folder of instructions and tools that an agent loads when a task calls for it |
+| memory wipe, context compaction | an agent can only keep so much text in mind; in a long session, older parts get summarized and details are lost |
+| test, acceptance test | a small program that checks your code; the acceptance test is the one that proves a task is done |
 | regression | something that used to work and now doesn't |
-| golden output | saved "known good" numbers that later runs are compared with |
-| tolerance | how far two numbers may differ and still count as equal (computer arithmetic with decimals is never exact) |
-| invariant | something that must stay true, like conserved energy or a positive mass |
+| saved numbers, golden output | "known good" results recorded once and compared with later runs |
+| tolerance | how far two numbers may differ and still count as equal (computer math with decimals is rarely exact) |
+| invariant | something that must stay true, such as "the shares add up to the bill" |
+| hypothesis | a guess about the cause of a bug, written down so it can be tested |
+| baseline | the tests that already failed before the work started |
 | snapshot, restore point | a record of the exact content of every file at one moment |
 | patch | a file that describes changes; `git apply <patch>` brings them back |
 | scope | the files a task is allowed to change |
@@ -298,6 +409,14 @@ settings inside `.git/`: if `.sci/` gets deleted, running `init` again brings th
 ¹ Codex runs hooks only with `[features] hooks = true` in its `config.toml`.
 
 ## FAQ
+
+<details>
+<summary><b>Is it only for scientific code?</b></summary>
+
+No. It was built for scientific and numerical code, which is why it has the saved-numbers check, but the loop
+works for any code that has tests. The example above is a bill splitter.
+
+</details>
 
 <details>
 <summary><b>Does anything leave my machine?</b></summary>
@@ -325,8 +444,9 @@ No. It is tuned for small models, but larger ones get the same safety rails on l
 <details>
 <summary><b>How do I update or uninstall?</b></summary>
 
-Run the install command again to update. To remove everything the installer added, run it with `--uninstall`
-(see [install options](#install-options)). Inside a repository, `.sci/sci purge --yes` deletes the harness state.
+Run the install command again to update. If you installed the skill under its old name, `software-engineer`,
+updating renames it to `sci`. To remove everything the installer added, run it with `--uninstall` (see
+[install options](#install-options)). Inside a repository, `.sci/sci purge --yes` deletes the harness state.
 
 </details>
 
@@ -357,7 +477,8 @@ $env:SCI_ARGS = "--hooks"; irm https://raw.githubusercontent.com/Nag681/sci-harn
 ```
 
 - Command Prompt: add the options after `%TEMP%\sci.ps1`.
-- A tagged version instead of `main`: set `SCI_REF=v3.0.0` first.
+- A tagged version instead of `main`: set `SCI_REF` to one of the
+  [tags](https://github.com/Nag681/sci-harness/tags) first.
 - From a clone: `python3 install.py <options>`.
 - Prefer to read the script first? Download it, read it, then run `sh install.sh`
   (Windows: `powershell -ExecutionPolicy Bypass -File install.ps1`).
@@ -367,14 +488,14 @@ $env:SCI_ARGS = "--hooks"; irm https://raw.githubusercontent.com/Nag681/sci-harn
 <details>
 <summary><b>Where it installs</b></summary>
 
-The skill lives in `~/.local/share/agent-skills/software-engineer`. Each agent gets a link to it:
+The skill lives in `~/.local/share/agent-skills/sci`. Each agent gets a link to it:
 
 | Agent | Skill folder | Hooks go into |
 | --- | --- | --- |
 | Claude Code | `~/.claude/skills/` | `~/.claude/settings.json` |
 | Codex CLI | `~/.agents/skills/` | `~/.codex/hooks.json` |
 | Gemini CLI | `~/.agents/skills/` | `~/.gemini/settings.json` |
-| Antigravity | `~/.gemini/config/plugins/software-engineer/` | the plugin's `hooks.json` |
+| Antigravity | `~/.gemini/config/plugins/sci/` | the plugin's `hooks.json` |
 | OpenCode, pi | `~/.agents/skills/` | (no hooks) |
 | anything else | `--target <dir>` | (no hooks) |
 

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Online installer for sci-harness, the software-engineer agent skill. Linux, macOS, WSL and Git Bash.
+# Online installer for Sci-Harness, the sci agent skill. Linux, macOS, WSL and Git Bash.
 #
 #   curl -fsSL https://raw.githubusercontent.com/Nag681/sci-harness/main/install.sh | sh
 #   curl -fsSL https://raw.githubusercontent.com/Nag681/sci-harness/main/install.sh | sh -s -- --hooks

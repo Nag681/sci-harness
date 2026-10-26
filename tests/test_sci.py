@@ -714,6 +714,27 @@ class TestGoldenAndBaseline(unittest.TestCase):
         self.assertEqual(sb.state()["review"][-1]["kind"], "tolerance-loosened")
         sb.ok("golden", "check")
 
+    def test_intended_golden_change_leads_back_to_verify(self):
+        sb = Sandbox(self)
+        sb.init()
+        sb.ok("golden", "add", "euler", "--cmd", "%s demo.py" % PYQ)
+        sb.add_rk2_task()
+        sb.ok("task", "start")
+        sb.write_rk2_test()
+        sb.sci("check")
+        sb.ok("lock")
+        sb.write_rk2()
+        sb.write("pkg/core.py", sb.read("pkg/core.py").replace("y + dt * (-rate * y)", "y + dt * (-rate * y) * 1.0000001"))
+        sb.ok("check")
+        rc, out = sb.sci("verify")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("NEXT: Golden euler changed", out)
+        out = sb.ok("golden", "update", "euler", "--reason", "euler now applies the corrected rate")
+        self.assertIn("NEXT: Golden euler is up to date. Run `.sci/sci verify` again.", out)
+        self.assertNotIn("uncommitted changes", out)
+        sb.ok("verify")
+        sb.ok("done", "-m", "feat: rk2 and corrected euler")
+
     def test_golden_refuses_nondeterministic_output(self):
         sb = Sandbox(self)
         sb.init()

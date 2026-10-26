@@ -34,7 +34,7 @@ import sys
 import time
 from pathlib import Path
 
-VERSION = "3.0.0"
+VERSION = "3.1.0"
 SD = ".sci"
 SCHEMA = 1
 WINDOWS = os.name == "nt"
@@ -1087,6 +1087,13 @@ def compute_next(st, cfg, live_tree=None):
             return ("If the check fails for the expected reason (feature missing, not a broken test), lock the "
                     "acceptance tests: `.sci/sci lock`, then implement in small steps.")
         if lc is None or not lc.get("ok"):
+            g = (lc or {}).get("golden")  # set when verify failed on this golden
+            if g and g in st["goldens"] and not (st["goldens"][g].get("last") or {}).get("ok"):
+                return ('Golden %s changed. Not intended: fix the code, then `.sci/sci check`. Intended (bug fix, better '
+                        'scheme): `.sci/sci golden update %s --reason "..."`, then `.sci/sci verify`. Strike %d/3.'
+                        % (g, g, t.get("strikes", 0)))
+            if g:
+                return "Golden %s is up to date. Run `.sci/sci verify` again." % g
             return "Fix the code (not the tests), then `.sci/sci check`. Strike %d/3." % t.get("strikes", 0)
         vt = t.get("verified_tree")
         if not vt:
@@ -2285,7 +2292,7 @@ def cmd_verify(args):
     store = load_store()
     repo, st, cfg = store.repo, store.st, store.cfg
     t = active_task(st)
-    lines, ok = [], True
+    lines, ok, failed_golden = [], True, None
     with state_lock(repo):
         cur_tree, big = snapshot(repo, cfg)
         viol = run_guard(repo, st, cfg, t, cur_tree)
@@ -2322,7 +2329,7 @@ def cmd_verify(args):
                 g_ok, glines = golden_check_one(store, name)
                 lines += glines
                 if not g_ok:
-                    ok = False
+                    ok, failed_golden = False, name
                     break
         if ok and not args.quick and cfg.get("regress_cmd"):
             r = run_cmd(store, cfg["regress_cmd"], "regress", t["id"] if t else None, int(cfg["verify_timeout"]))
@@ -2355,6 +2362,8 @@ def cmd_verify(args):
             else:
                 t["verified_tree"] = None
                 lines += record_attempt(store, t, False, cur_tree, None) if not viol else []
+                if failed_golden:
+                    t["last_check"]["golden"] = failed_golden
         st["last_verify"] = {"t": now_iso(), "ok": ok, "task": t["id"] if t else None, "quick": bool(args.quick),
                              "tree": cur_tree}
         store.log("VERIFY", task=t["id"] if t else None, msg="PASS" if ok else "FAIL", quick=bool(args.quick))
@@ -2830,7 +2839,7 @@ def cmd_golden(args):
             store.save()
             print("Golden %s %s: %d numbers, rtol=%g atol=%g (reproducible across 2 runs)." % (
                 name, "recorded" if a == "add" else "re-recorded", len(vals), rtol, atol))
-            if dirty:
+            if dirty and a == "add":
                 print("  note: recorded with uncommitted changes in the tree. Goldens should capture known-good "
                       "behavior (usually recorded before you change numerical code).")
         elif a == "retol":

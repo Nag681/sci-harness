@@ -11,7 +11,7 @@ pattern, not the numbers.
 $ .sci/sci resume
 bash: .sci/sci: No such file or directory
 
-$ python3 ~/.claude/skills/software-engineer/scripts/sci.py init --objective "Add a velocity Verlet integrator that conserves energy; keep Euler results unchanged"
+$ python3 ~/.claude/skills/sci/scripts/sci.py init --objective "Add a velocity Verlet integrator that conserves energy; keep Euler results unchanged"
 sci 3.0.0 initialized in /home/me/orbit
   state: .sci/ (git-ignored via .git/info/exclude; never commit it)
   tool : .sci/sci <command>   (use this path from now on)

@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] - 2026-10-26
+
+### Changed
+- The skill is now named `sci` (`/sci` in Claude Code) and the project Sci-Harness. The skill installs to
+  `~/.local/share/agent-skills/sci` and each agent's `skills/sci` folder. Running the installer again moves an
+  install made under the old name, `software-engineer`: it removes the links, copies, Antigravity plugin and
+  installed copy it made there, points existing hooks at the new location and leaves everything else alone.
+  `--status` lists what is left under the old name.
+- README: written for newcomers, with how-to steps, a small bill-splitting example that uses real sci output, and
+  the architecture.
+
+### Fixed
+- After `verify` failed only because a golden changed, `NEXT:` said "Fix the code" even once the change had
+  been justified with `golden update`. It now says to fix the code or justify the change, and after
+  `golden update` it says to run `verify` again.
+- `golden update` no longer warns about uncommitted changes, which are expected when re-recording.
+
 ## [3.0.0] - 2026-10-26
 
 Rewritten for one job: keeping small models productive on long-horizon scientific and numerical
@@ -66,6 +83,6 @@ folder and generic DevSecOps/CI-CD material are gone.
 
 ## [2.x and earlier]
 
-Unpublished predecessors under the same name: a general software-engineering guide (ADRs, event
+Unpublished predecessors named `software-engineer`: a general software-engineering guide (ADRs, event
 logging, security audits, CI/CD). Nothing from them remains in 3.0.0 except the task import from
 `.agent/feature_list.json`.

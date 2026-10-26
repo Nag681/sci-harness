@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install the software-engineer skill (the sci harness) for the coding agents on this machine.
+"""Install the sci skill (Sci-Harness) for the coding agents on this machine.
 
   python3 install.py                 install for every detected agent (skill files only, no config edits)
   python3 install.py --hooks         also register the sci hooks in the agents' configs (backups first)
@@ -52,6 +52,8 @@ def skill_meta(d):
 
 
 NAME, VERSION = skill_meta(HERE)
+# Earlier names of this skill: install and uninstall also remove what this installer made under them.
+OLD_NAMES = ("software-engineer",)
 
 
 def data_home():
@@ -261,6 +263,37 @@ def unplace(plan, home_dir, dst):
             remove_path(dst)
 
 
+def old_agy_hooks_on():
+    """True if our Antigravity plugin under an earlier name has hooks on: the renamed plugin keeps them."""
+    for old in OLD_NAMES:
+        hj = AGY_PLUGINS / old / "hooks.json"
+        if old != NAME and (AGY_PLUGINS / old / MARK).is_file() and hj.is_file() \
+                and HOOK_TAG in hj.read_text(encoding="utf-8"):
+            return True
+    return False
+
+
+def remove_old_names(plan, prefix, dirs, plugin, keep_home):
+    """Remove the links, copies, Antigravity plugin (if plugin) and installed copy (unless keep_home) that this
+    installer made under the skill's earlier names. Anything else is left alone."""
+    for old in OLD_NAMES:
+        if old == NAME:
+            continue
+        old_home = prefix / old
+        for p in [d / old for d in dirs] + ([AGY_PLUGINS / old] if plugin else []):
+            if os.path.lexists(str(p)) and is_ours(p, old_home):
+                plan.say("  removed %s (old name)" % tilde(p))
+                if not plan.dry:
+                    remove_path(p)
+            elif (p / "scripts" / "sci.py").is_file():
+                plan.say("  note: %s holds an older copy of this skill that the installer did not make; delete it "
+                         "so agents don't list the skill twice" % tilde(p))
+        if not keep_home and (old_home / MARK).is_file():
+            plan.say("  removed %s (old name)" % tilde(old_home))
+            if not plan.dry:
+                remove_path(old_home)
+
+
 # --------------------------------------------------------------------------- hooks
 
 def hook_cmd(home_dir, mode):
@@ -442,7 +475,7 @@ def install_agy(plan, home_dir, copy, prefix, force, hooks):
     pdir.mkdir(parents=True, exist_ok=True)
     desc = ("Durable-memory harness for long-horizon scientific and numerical coding in large codebases; built "
             "for small models.")
-    (pdir / "plugin.json").write_text(json.dumps({"name": NAME, "displayName": "Software Engineer (sci)",
+    (pdir / "plugin.json").write_text(json.dumps({"name": NAME, "displayName": "Sci-Harness",
                                                   "description": desc, "version": VERSION}, indent=2) + "\n",
                                       encoding="utf-8")
     write_mark(pdir, "antigravity-plugin")
@@ -507,19 +540,27 @@ def cmd_install(args, prefix, home_dir):
     for a in agents:
         sdir = AGENTS[a][0]
         if a == "antigravity":
-            install_agy(plan, home_dir, args.copy, prefix, args.force, args.hooks or hooks_present(a))
+            install_agy(plan, home_dir, args.copy, prefix, args.force,
+                        args.hooks or hooks_present(a) or old_agy_hooks_on())
         elif sdir not in done:
             done.add(sdir)
             place(plan, home_dir, sdir / NAME, args.copy, prefix, args.force, sdir.parent.name.strip(".") + "-skill")
-    for t in args.target or []:
-        place(plan, home_dir, Path(t).expanduser().resolve() / NAME, args.copy, prefix, args.force, "target-skill")
-    for proj in args.project or []:
-        root = Path(proj).expanduser().resolve()
-        for sub in (".claude/skills", ".agents/skills"):
-            place(plan, home_dir, root / sub / NAME, True, prefix, args.force, "project-skill")
-    refresh = [a for a in agents if a != "antigravity" and (args.hooks or hooks_present(a))]
+    targets = [Path(t).expanduser().resolve() for t in args.target or []]
+    for t in targets:
+        place(plan, home_dir, t / NAME, args.copy, prefix, args.force, "target-skill")
+    projects = [Path(proj).expanduser().resolve() / sub for proj in args.project or []
+                for sub in (".claude/skills", ".agents/skills")]
+    for d in projects:
+        place(plan, home_dir, d / NAME, True, prefix, args.force, "project-skill")
+    # Existing hooks are rewritten to point here, also for agents not detected (unless --only).
+    refresh = [a for a in (agents if args.only else AGENTS) if a != "antigravity"
+               and ((args.hooks and a in agents) or hooks_present(a))]
     if refresh:
         apply_hooks(plan, home_dir, refresh, True)
+    dirs = [AGENTS[a][0] for a in agents if AGENTS[a][0]] if args.only else \
+        [CLAUDE_HOME / "skills", AGENTS_SKILLS] + OTHER_SKILL_DIRS
+    remove_old_names(plan, prefix, dirs + targets + projects, "antigravity" in agents or not args.only,
+                     keep_home=bool(args.only))
     for a in agents:
         if a == "codex" and (CODEX_HOME / "skills" / NAME).exists() and not is_ours(CODEX_HOME / "skills" / NAME,
                                                                                          home_dir):
@@ -554,11 +595,12 @@ def cmd_uninstall(args, prefix, home_dir):
             if not plan.dry:
                 remove_path(pdir)
     dirs = sorted(set([CLAUDE_HOME / "skills", AGENTS_SKILLS] + OTHER_SKILL_DIRS), key=str)
-    for d in dirs + [Path(t).expanduser().resolve() for t in args.target or []]:
+    dirs += [Path(t).expanduser().resolve() for t in args.target or []]
+    dirs += [Path(proj).expanduser().resolve() / sub for proj in args.project or []
+             for sub in (".claude/skills", ".agents/skills")]
+    for d in dirs:
         unplace(plan, home_dir, d / NAME)
-    for proj in args.project or []:
-        for sub in (".claude/skills", ".agents/skills"):
-            unplace(plan, home_dir, Path(proj).expanduser().resolve() / sub / NAME)
+    remove_old_names(plan, prefix, dirs, "antigravity" in agents, keep_home=bool(args.only))
     if not args.only and os.path.lexists(str(home_dir)) and (home_dir / MARK).is_file():
         plan.say("  removed %s" % tilde(home_dir))
         if not plan.dry:
@@ -602,6 +644,11 @@ def cmd_status(args, prefix, home_dir):
         print("antigravity plugin: %s (version %s, %s, hooks %s)" % (tilde(pdir), pv,
                                                                      "ours" if is_ours(pdir, home_dir) else "not ours",
                                                                      "on" if hooks else "off"))
+    skill_dirs = [CLAUDE_HOME / "skills", AGENTS_SKILLS] + OTHER_SKILL_DIRS
+    for old in [n for n in OLD_NAMES if n != NAME]:
+        left = [p for p in [prefix / old, AGY_PLUGINS / old] + [d / old for d in skill_dirs] if os.path.lexists(str(p))]
+        if left:
+            print("old name %s (the next install removes what it made): %s" % (old, ", ".join(map(tilde, left))))
     print("hooks:")
     for label, path in (("Claude Code", CLAUDE_HOME / "settings.json"), ("Codex", CODEX_HOME / "hooks.json"),
                         ("Gemini CLI", GEMINI_SETTINGS)):

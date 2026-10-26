@@ -1,4 +1,4 @@
-# Online installer for sci-harness, the software-engineer agent skill, on Windows (PowerShell 5.1 or 7).
+# Online installer for Sci-Harness, the sci agent skill, on Windows (PowerShell 5.1 or 7).
 #
 #   PowerShell:   irm https://raw.githubusercontent.com/Nag681/sci-harness/main/install.ps1 | iex
 #   cmd.exe:      curl -fsSLo %TEMP%\sci.ps1 https://raw.githubusercontent.com/Nag681/sci-harness/main/install.ps1 && powershell -NoProfile -ExecutionPolicy Bypass -File %TEMP%\sci.ps1
