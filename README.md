@@ -113,8 +113,8 @@ The skill lives in `~/.local/share/agent-skills/software-engineer`. Each agent g
 | OpenCode, pi | `~/.agents/skills/` | (no hooks) |
 | anything else | `--target <dir>` | (no hooks) |
 
-Older versions are moved to `~/.local/share/agent-skills/backups/`, never deleted. Restart running
-agents after installing.
+Updates replace what the installer put there itself. Anything else in the way is moved to
+`~/.local/share/agent-skills/backups/`, never deleted. Restart running agents after installing.
 
 </details>
 

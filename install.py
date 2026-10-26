@@ -564,7 +564,7 @@ def cmd_uninstall(args, prefix, home_dir):
         if not plan.dry:
             remove_path(home_dir)
     if backup_dir(prefix).is_dir():
-        print("Earlier versions this installer replaced are kept in %s" % tilde(backup_dir(prefix)))
+        print("Folders the installer moved out of its way are kept in %s" % tilde(backup_dir(prefix)))
     print("Repositories keep their .sci/ folders; inside one, `.sci/sci purge --yes` removes the harness state.")
     return 0
 
