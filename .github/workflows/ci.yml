@@ -1,0 +1,133 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python: "3.x" }
+          - { os: ubuntu-22.04, python: "3.8" }
+          - { os: macos-latest, python: "3.x" }
+          - { os: windows-latest, python: "3.x" }
+          - { os: windows-latest, python: "3.8" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        id: py
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install --quiet pytest
+      - name: Unit tests (sci, hooks, install.py, install.sh, install.ps1)
+        env:
+          SCI_TEST_PYTEST_PY: ${{ steps.py.outputs.python-path }}
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -m unittest discover -s tests -v
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck install.sh
+
+  # The one-liners from the README, run against this exact commit.
+  online-install:
+    name: online installer (${{ matrix.os }})
+    if: github.event_name != 'pull_request'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      SCI_REPO: ${{ github.repository }}
+      SCI_REF: ${{ github.sha }}
+      RAW: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}
+    steps:
+      - name: curl | sh
+        if: runner.os != 'Windows'
+        run: |
+          curl -fsSL "$RAW/install.sh" | sh -s -- --only claude,gemini
+          test -f ~/.claude/skills/software-engineer/SKILL.md
+          test -f ~/.agents/skills/software-engineer/SKILL.md
+          python3 ~/.local/share/agent-skills/software-engineer/install.py --status
+
+      - name: the installed skill works (bash)
+        if: runner.os != 'Windows'
+        run: |
+          cd "$(mktemp -d)"
+          git -c init.defaultBranch=main init -q
+          git -c user.name=ci -c user.email=ci@example.com commit -q --allow-empty -m init
+          python3 ~/.local/share/agent-skills/software-engineer/scripts/sci.py init --objective "smoke test"
+          .sci/sci task add "smoke" --verify "python3 -c 'print(42)'" --scope x
+          .sci/sci task start
+          .sci/sci check
+          .sci/sci resume
+
+      - name: uninstall (curl | sh)
+        if: runner.os != 'Windows'
+        run: |
+          curl -fsSL "$RAW/install.sh" | sh -s -- --uninstall
+          test ! -e ~/.claude/skills/software-engineer
+          test ! -e ~/.local/share/agent-skills/software-engineer
+
+      - name: irm | iex (Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $env:SCI_ARGS = '--only claude,gemini'
+          irm "$env:RAW/install.ps1" | iex
+          if (-not (Test-Path "$HOME\.claude\skills\software-engineer\SKILL.md")) { throw 'claude skill missing' }
+          if (-not (Test-Path "$HOME\.agents\skills\software-engineer\SKILL.md")) { throw 'agents skill missing' }
+
+      - name: the installed skill works (PowerShell, cmd.exe, Git Bash)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $repo = Join-Path $env:RUNNER_TEMP 'smoke'
+          New-Item -ItemType Directory -Path $repo | Out-Null
+          Set-Location $repo
+          git -c init.defaultBranch=main init -q
+          git -c user.name=ci -c user.email=ci@example.com commit -q --allow-empty -m init
+          python "$HOME\.local\share\agent-skills\software-engineer\scripts\sci.py" init --objective "smoke test"
+          if ($LASTEXITCODE -ne 0) { throw 'init failed' }
+          .sci/sci task add smoke --verify "python -c 'print(42)'" --scope x
+          .sci/sci task start
+          .sci/sci check
+          if ($LASTEXITCODE -ne 0) { throw 'check failed in PowerShell' }
+          cmd /d /c ".sci\sci resume"
+          if ($LASTEXITCODE -ne 0) { throw 'resume failed in cmd.exe' }
+          & "$env:ProgramFiles\Git\bin\bash.exe" -c ".sci/sci verify"
+          if ($LASTEXITCODE -ne 0) { throw 'verify failed in Git Bash' }
+
+      - name: curl.exe in cmd.exe, with arguments
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          curl -fsSLo %TEMP%\sci-install.ps1 %RAW%/install.ps1 && powershell -NoProfile -ExecutionPolicy Bypass -File %TEMP%\sci-install.ps1 --only claude --status
+
+      - name: curl | sh in Git Bash
+        if: runner.os == 'Windows'
+        shell: bash
+        run: curl -fsSL "$RAW/install.sh" | sh -s -- --only claude
+
+      - name: script block with arguments (PowerShell 7), then uninstall
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & ([scriptblock]::Create((irm "$env:RAW/install.ps1"))) --uninstall
+          if (Test-Path "$HOME\.claude\skills\software-engineer") { throw 'still installed' }

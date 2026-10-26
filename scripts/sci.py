@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import argparse
 import ast
+import base64
 import contextlib
 import datetime as _dt
 import difflib
+import functools
 import hashlib
 import json
 import math
@@ -35,11 +37,13 @@ from pathlib import Path
 VERSION = "3.0.0"
 SD = ".sci"
 SCHEMA = 1
+WINDOWS = os.name == "nt"
 
 DEFAULT_CONFIG = {
     "test_cmd": "",
     "regress_cmd": "",
     "build_cmd": "",
+    "shell": "",
     "build_globs": [
         "**/*.c", "**/*.h", "**/*.cc", "**/*.cpp", "**/*.cxx", "**/*.hpp", "**/*.cu",
         "**/*.f", "**/*.for", "**/*.f90", "**/*.F90", "**/*.f95", "**/*.F",
@@ -130,14 +134,22 @@ def read_text(path):
 
 
 def atomic_write(path, text):
+    """Write text exactly as given (no newline translation, so shell scripts keep LF on Windows)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp%d" % os.getpid())
-    with open(str(tmp), "w", encoding="utf-8") as f:
+    with open(str(tmp), "w", encoding="utf-8", newline="\n") as f:
         f.write(text)
         f.flush()
         os.fsync(f.fileno())
-    os.replace(str(tmp), str(path))
+    for attempt in range(20):
+        try:
+            os.replace(str(tmp), str(path))
+            return
+        except PermissionError:  # Windows: a reader (hook, editor, virus scanner) has the file open
+            if attempt == 19:
+                raise
+            time.sleep(0.1)
 
 
 def chunked(items, n):
@@ -404,19 +416,31 @@ def state_lock(repo, required=True):
         import fcntl
     except ImportError:
         fcntl = None
+    try:
+        import msvcrt
+    except ImportError:
+        msvcrt = None
     repo.dir.mkdir(parents=True, exist_ok=True)
     f = open(str(repo.dir / ".lock"), "a+")
-    held = True
+    held, win_locked = True, False
     try:
-        if fcntl is not None:
-            try:
+        try:
+            if fcntl is not None:
                 fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                if required:
-                    raise Refuse("Another sci command is running in this repo. Wait for it to finish, then retry.")
-                held = False
+            elif msvcrt is not None:
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                win_locked = True
+        except OSError:
+            if required:
+                raise Refuse("Another sci command is running in this repo. Wait for it to finish, then retry.")
+            held = False
         yield held
     finally:
+        if win_locked:
+            with contextlib.suppress(OSError):
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
         f.close()
 
 
@@ -450,7 +474,7 @@ class Store:
         st = self._read_json(self.state_path, "state.json")
         if st is None:
             refuse("No sci state found in %s." % self.repo.root,
-                   'Initialize from the repo root: python3 <skill-dir>/scripts/sci.py init --objective "<goal>"')
+                   'Initialize from the repo root: %s <skill-dir>/scripts/sci.py init --objective "<goal>"' % PY_HINT)
         cfg = dict(DEFAULT_CONFIG)
         cfg.update(self._read_json(self.config_path, "config.json") or {})
         self.st, self.cfg = upgrade_state(st), cfg
@@ -485,7 +509,7 @@ class Store:
         if data:
             rec["data"] = data
         self.repo.dir.mkdir(parents=True, exist_ok=True)
-        with open(str(self.events_path), "a", encoding="utf-8") as f:
+        with open(str(self.events_path), "a", encoding="utf-8", newline="\n") as f:
             f.write(json.dumps(rec) + "\n")
 
 
@@ -636,13 +660,85 @@ def extract_summary(lines):
     return found[-2:]
 
 
+@functools.lru_cache(maxsize=None)
+def windows_bash():
+    """Git for Windows' bash.exe, or None. Never WSL's System32\\bash.exe, which would run the command in Linux."""
+    cands = []
+    g = shutil.which("git")
+    if g:
+        root = Path(g).resolve().parent.parent  # <Git>\cmd\git.exe or <Git>\mingw64\bin\git.exe
+        for base in (root, root.parent):
+            cands += [base / "bin" / "bash.exe", base / "usr" / "bin" / "bash.exe"]
+    w = shutil.which("bash")
+    if w and not re.search(r"[\\/](?:system32|windowsapps)[\\/]", w, re.I):
+        cands.append(Path(w))
+    for var in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)", "LOCALAPPDATA"):
+        if os.environ.get(var):
+            base = Path(os.environ[var])
+            cands += [base / "Git" / "bin" / "bash.exe", base / "Programs" / "Git" / "bin" / "bash.exe"]
+    for c in cands:
+        if c.is_file():
+            return str(c)
+    return None
+
+
+def shell_argv(cfg, cmd):
+    """(args, use_shell) for subprocess to run a command string. POSIX: bash -c (else sh). Windows: Git Bash -c,
+    else cmd.exe. The `shell` config key overrides: a POSIX shell path, "cmd", "powershell" or "pwsh"."""
+    want = ((cfg or {}).get("shell") or "").strip()
+    kind = os.path.basename(want).lower()
+    kind = kind[:-4] if kind.endswith(".exe") else kind
+    if kind == "cmd" or (not want and WINDOWS and not windows_bash()):
+        return cmd, True  # Python's own cmd.exe quoting (/c "...") is the one cmd understands
+    if kind in ("powershell", "pwsh"):
+        enc = base64.b64encode(cmd.encode("utf-16-le")).decode("ascii")
+        return [want, "-NoProfile", "-NonInteractive", "-EncodedCommand", enc], False
+    if want:
+        return [want, "-c", cmd], False
+    if WINDOWS:
+        return [windows_bash(), "-c", cmd], False
+    return [shutil.which("bash") or "/bin/sh", "-c", cmd], False
+
+
+def shell_label(cfg):
+    args, use_shell = shell_argv(cfg, "")
+    return (os.environ.get("COMSPEC") or "cmd.exe") if use_shell else args[0]
+
+
+def uses_bash(cfg):
+    args, use_shell = shell_argv(cfg, "")
+    return not use_shell and os.path.basename(args[0]).lower() in ("bash", "bash.exe", "sh", "sh.exe")
+
+
+def python_argv():
+    """How a shell here calls Python 3.8+: python3 on POSIX; py -3, python or python3 on Windows. Each candidate
+    is run once, because the Microsoft Store stubs named python/python3 only print an install hint."""
+    cands = [["py", "-3"], ["python"], ["python3"]] if WINDOWS else [["python3"], ["python"]]
+    for c in cands:
+        if not shutil.which(c[0]):
+            continue
+        try:
+            p = subprocess.run(c + ["-c", "import sys; sys.exit(sys.version_info < (3, 8))"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if p.returncode == 0:
+            return c
+    return None
+
+
+PY_HINT = ("py -3" if shutil.which("py") else "python") if WINDOWS else "python3"
+
+
 def kill_tree(p):
     try:
         if os.name == "posix":
             os.killpg(p.pid, signal.SIGTERM)
         else:
-            p.terminate()
-    except OSError:
+            # terminate() would end only the shell; its children would keep running and holding the log open
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
         pass
     try:
         p.wait(timeout=10)
@@ -671,14 +767,14 @@ def run_cmd(store, cmd, kind, task_id=None, timeout=900):
     env.update({"NO_COLOR": "1", "PY_COLORS": "0", "TERM": "dumb", "CLICOLOR": "0",
                 "CARGO_TERM_COLOR": "never", "GTEST_COLOR": "no", "SCI_HARNESS": "1",
                 "PYTHONUNBUFFERED": "1"})
-    shell = shutil.which("bash") or "/bin/sh"
+    args, use_shell = shell_argv(cfg, cmd)
     t0 = time.time()
     timed_out = False
     with open(str(log), "wb") as f:
         f.write(("$ %s\n" % cmd).encode("utf-8"))
         f.flush()
         try:
-            p = subprocess.Popen([shell, "-c", cmd], cwd=str(repo.root), stdout=f, stderr=subprocess.STDOUT,
+            p = subprocess.Popen(args, shell=use_shell, cwd=str(repo.root), stdout=f, stderr=subprocess.STDOUT,
                                  stdin=subprocess.DEVNULL, env=env, start_new_session=(os.name == "posix"))
         except OSError as e:
             f.write(("sci: could not start command: %s\n" % e).encode("utf-8"))
@@ -737,6 +833,9 @@ def report_run(repo, cfg, r, label, quiet_pass=False):
             out.append("  --- last %d lines ---" % n)
             out += ["  | " + trunc(ln, 220) for ln in body[-n:]]
         out.append("  (full log: .sci/sci out %d --grep <pattern>)" % r.n)
+        if WINDOWS and "\\" in r.cmd and uses_bash(cfg):
+            out.append("  note: sci runs commands with bash (%s), where \\ is an escape character. Write paths "
+                       "with forward slashes: tests/test_x.py" % shell_label(cfg))
     else:
         out += ["  | " + trunc(ln, 220) for ln in body[-3:]]
     return out
@@ -1203,16 +1302,20 @@ def detect_toolchain(root):
         return any((root / n).exists() for n in names)
 
     py = None
-    for cand in (".venv/bin/python", "venv/bin/python", "env/bin/python"):
+    for cand in (".venv/bin/python", "venv/bin/python", "env/bin/python",
+                 ".venv/Scripts/python.exe", "venv/Scripts/python.exe", "env/Scripts/python.exe"):
         if (root / cand).exists():
             py = cand
             break
     pyproj = has("pyproject.toml", "setup.py", "setup.cfg", "pytest.ini", "tox.ini", "conftest.py")
     if pyproj or ((root / "tests").is_dir() and any((root / "tests").glob("*.py"))):
-        interp_s = py or "python3"
-        interp_exec = str(root / py) if py else (shutil.which("python3") or sys.executable)
+        found = python_argv()
+        interp_s = py or (" ".join(found) if found else PY_HINT)
+        if py and WINDOWS and not windows_bash():
+            interp_s = py.replace("/", "\\")  # cmd.exe reads /Scripts as a switch
+        interp_exec = [str(root / py)] if py else (found or [sys.executable])
         try:
-            probe = subprocess.run([interp_exec, "-m", "pytest", "--version"], cwd=str(root),
+            probe = subprocess.run(interp_exec + ["-m", "pytest", "--version"], cwd=str(root),
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                    encoding="utf-8", errors="replace", timeout=60)
             has_pytest = probe.returncode == 0
@@ -1383,12 +1486,36 @@ def find_root():
     return Path(p.stdout.strip())
 
 
+# Each interpreter is tried, because on Windows (Git Bash) python3/python may be Microsoft Store stubs.
 SCI_WRAPPER = """#!/bin/sh
 # sci launcher (generated). Usage: .sci/sci <command>   (see: .sci/sci help)
 d=$(dirname "$0")
-if command -v python3 >/dev/null 2>&1; then exec python3 "$d/sci.py" "$@"; fi
-exec python "$d/sci.py" "$@"
+for py in python3 python; do
+  if command -v "$py" >/dev/null 2>&1 && "$py" -c 'import sys; sys.exit(sys.version_info < (3, 8))' >/dev/null 2>&1; then
+    exec "$py" "$d/sci.py" "$@"
+  fi
+done
+if command -v py >/dev/null 2>&1; then exec py -3 "$d/sci.py" "$@"; fi
+echo "sci: Python 3.8+ not found (tried python3, python, py -3)" >&2
+exit 127
 """
+
+# For cmd.exe and PowerShell, which find .sci/sci.cmd when told to run .sci/sci. The interpreter that ran
+# `init` comes first. "& exit /b" keeps the exit code and reads nothing more from the file (purge deletes it).
+SCI_CMD_WRAPPER = "\r\n".join([
+    "@echo off",
+    "rem sci launcher (generated). Usage: .sci\\sci COMMAND   (see: .sci\\sci help)",
+    "setlocal",
+    'set "SCI_PY=%s"',
+    'if exist "%%SCI_PY%%" goto run',
+    "where py >nul 2>nul",
+    "if errorlevel 1 goto python",
+    'py -3 "%%~dp0sci.py" %%* & exit /b',
+    ":python",
+    'set "SCI_PY=python"',
+    ":run",
+    '"%%SCI_PY%%" "%%~dp0sci.py" %%* & exit /b',
+    ""])
 
 
 def vendor_self(repo):
@@ -1405,6 +1532,10 @@ def vendor_self(repo):
         atomic_write(w, SCI_WRAPPER)
         changed = True
     os.chmod(str(w), 0o755)
+    wc = repo.dir / "sci.cmd"
+    launcher = SCI_CMD_WRAPPER % sys.executable
+    if read_text(wc) != launcher:
+        atomic_write(wc, launcher)
     return changed
 
 
@@ -1413,7 +1544,7 @@ def ensure_excluded(repo):
     text = read_text(ex) or ""
     if not re.search(r"(?m)^/?\.sci/?$", text):
         ex.parent.mkdir(parents=True, exist_ok=True)
-        with open(str(ex), "a", encoding="utf-8") as f:
+        with open(str(ex), "a", encoding="utf-8", newline="\n") as f:
             if text and not text.endswith("\n"):
                 f.write("\n")
             f.write("# sci harness state (local only)\n/.sci/\n")
@@ -1489,8 +1620,11 @@ def cmd_init(args):
         store.save()
     print("sci %s initialized in %s" % (VERSION, repo.root))
     print("  state: .sci/ (git-ignored via .git/info/exclude; never commit it)")
-    print("  tool : .sci/sci <command>   (use this path from now on)")
+    print("  tool : .sci/sci <command>   (use this path from now on%s)" % ("; in cmd.exe: .sci\\sci" if WINDOWS else ""))
     print("  test_cmd: %s" % (cfg["test_cmd"] or "(none detected: .sci/sci config set test_cmd \"<cmd>\")"))
+    if WINDOWS:
+        print("  shell: sci runs check/verify/golden commands with %s%s" % (
+            shell_label(cfg), " (use forward slashes and bash quoting)" if uses_bash(cfg) else ""))
     for n in notes:
         print("  note: " + n)
     if n_imp:
@@ -1613,7 +1747,8 @@ def cmd_objective(args):
     return 0
 
 
-WHOLE_SUITE_RE = re.compile(r"^\s*(?:\S*python3?\s+-m\s+)?(?:pytest|py\.test)(?:\s+-{1,2}[\w=-]+)*\s*$|"
+WHOLE_SUITE_RE = re.compile(r"^\s*(?:(?:\S*python(?:3[\d.]*)?(?:\.exe)?|py(?:\s+-3[\d.]*)?)\s+-m\s+)?"
+                            r"(?:pytest|py\.test)(?:\s+-{1,2}[\w=-]+)*\s*$|"
                             r"^\s*(?:make\s+(?:test|check)|npm\s+test.*|cargo\s+test(?:\s+-q)?|go\s+test\s+\./\.\.\.)\s*$")
 
 
@@ -1868,6 +2003,8 @@ RUNNER_RE = re.compile(r"(?:^|[\s;&|(/])(?:pytest|py\.test|unittest|nose2|nosete
 
 def verify_tokens(cmd):
     """Shell words of a command, with quoted sub-commands (sh -c "...") split one level further."""
+    if WINDOWS:
+        cmd = cmd.replace("\\", "/")  # tests\test_x.py; shlex would read the backslashes as escapes
     try:
         toks = shlex.split(cmd)
     except ValueError:
@@ -3027,7 +3164,7 @@ HELP = """sci %s - long-horizon scientific coding harness. State lives in .sci/;
 
 START / RECOVER
   resume                          live briefing + NEXT (run after any compaction or when unsure)
-  init --objective "..."          once per repo (from the skill: python3 <skill>/scripts/sci.py init)
+  init --objective "..."          once per repo (from the skill: %s <skill>/scripts/sci.py init)
 PLAN
   objective "..."                 set the overall goal
   task add "title" --verify "cmd" [--scope GLOB]... [--inv "invariant"]... [--dep T1]... [--why "..."]
@@ -3057,7 +3194,7 @@ SCIENCE
 INSPECT
   out [RUN] [--grep PAT] [--tail N] [--lines A:B]   read a saved log
   log [-n N] | review | report | baseline [--cmd ..] | config [set KEY VALUE] | pause | unpause
-""" % VERSION
+""" % (VERSION, PY_HINT)
 
 
 def cmd_help(args):
@@ -3241,6 +3378,9 @@ def build_parser():
 
 
 def main(argv=None):
+    for stream in (sys.stdout, sys.stderr):
+        with contextlib.suppress(AttributeError, ValueError, OSError):
+            stream.reconfigure(encoding="utf-8", errors="replace")  # Windows pipes default to the ANSI code page
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
         argv = ["help"]

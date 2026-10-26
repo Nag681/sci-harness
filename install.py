@@ -16,21 +16,26 @@ Standard library only; Python 3.8+. Linux, macOS and Windows (falls back to copi
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import re
 import shutil
+import stat
+import subprocess
 import sys
 import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 HOME = Path.home()
+WINDOWS = os.name == "nt"
 MARK = ".sci-install.json"  # written into every copy and plugin this installer creates
 HOOK_TAG = "sci_hook.py"    # identifies our entries in agent hook configs
 STAMP = time.strftime("%Y%m%d-%H%M%S")
-PY = "python" if os.name == "nt" else "python3"
-IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".git", ".pytest_cache", ".sci", MARK)
+# Repository files that agents do not need: kept out of every installed copy.
+IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".git", ".github", ".gitignore", ".gitattributes",
+                                ".pytest_cache", ".sci", "tests", "install.sh", "install.ps1", MARK)
 
 
 def skill_meta(d):
@@ -50,8 +55,8 @@ NAME, VERSION = skill_meta(HERE)
 
 
 def data_home():
-    if os.name == "nt":
-        return Path(os.environ.get("LOCALAPPDATA") or HOME / "AppData" / "Local")
+    # Also on Windows: the Microsoft Store Python redirects writes under AppData into its private folder,
+    # where the agents would never see the skill.
     return Path(os.environ.get("XDG_DATA_HOME") or HOME / ".local" / "share")
 
 
@@ -59,6 +64,33 @@ def tilde(p):
     s = str(p)
     h = str(HOME)
     return "~" + s[len(h):] if s == h or s.startswith(h + os.sep) else s
+
+
+def shell_path(p):
+    """A path to paste into a command: ~/... on POSIX; quoted and absolute on Windows (cmd.exe and PowerShell
+    do not expand ~ for programs)."""
+    return '"%s"' % p if WINDOWS else tilde(p)
+
+
+def runs_python(argv):
+    try:
+        return subprocess.run(argv + ["-c", "import sys; sys.exit(sys.version_info < (3, 8))"],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+@functools.lru_cache(maxsize=None)
+def python_cmd():
+    """How hooks and printed commands start Python 3.8+ here: python3 on POSIX; on Windows py -3, python or
+    python3, whichever really runs (the Microsoft Store stubs named python/python3 only print an install hint).
+    Falls back to the interpreter running this installer."""
+    cands = [["py", "-3"], ["python"], ["python3"]] if WINDOWS else [["python3"]]
+    for c in cands:
+        if shutil.which(c[0]) and runs_python(c):
+            return " ".join(c)
+    exe = Path(sys.executable).as_posix()
+    return '"%s"' % exe if " " in exe else exe
 
 
 CLAUDE_HOME = Path(os.environ.get("CLAUDE_CONFIG_DIR") or HOME / ".claude")
@@ -118,11 +150,36 @@ def write_mark(d, kind):
                                 encoding="utf-8")
 
 
+def _clear_readonly(func, path, _exc):
+    os.chmod(path, stat.S_IWRITE)  # Windows refuses to delete read-only files
+    func(path)
+
+
 def remove_path(p):
-    if os.path.islink(str(p)) or Path(p).is_file():
+    if os.path.islink(str(p)):
+        try:
+            os.unlink(str(p))
+        except OSError:
+            os.rmdir(str(p))  # a directory symlink on Windows
+    elif Path(p).is_file():
         os.unlink(str(p))
     elif Path(p).is_dir():
-        shutil.rmtree(str(p))
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(str(p), onexc=_clear_readonly)
+        else:
+            shutil.rmtree(str(p), onerror=_clear_readonly)
+
+
+def replace_dir(src, dst):
+    """os.replace with retries: on Windows a file in use (a running hook, a virus scanner) blocks the rename."""
+    for attempt in range(10):
+        try:
+            os.replace(str(src), str(dst))
+            return
+        except PermissionError:
+            if attempt == 9:
+                sys.exit("Cannot replace %s: a file in it is in use. Close running agents and try again." % dst)
+            time.sleep(0.5)
 
 
 def backup_dir(prefix):
@@ -156,8 +213,8 @@ def install_home(plan, home_dir, prefix):
     shutil.copytree(str(HERE), str(tmp), ignore=IGNORE)
     write_mark(tmp, "installed-copy")
     if os.path.lexists(str(home_dir)):
-        os.replace(str(home_dir), str(old))
-    os.replace(str(tmp), str(home_dir))
+        replace_dir(home_dir, old)
+    replace_dir(tmp, home_dir)
     if os.path.lexists(str(old)):
         remove_path(old)
 
@@ -183,16 +240,18 @@ def place(plan, home_dir, dst, copy, prefix, force, label):
         plan.say("  %s: %s" % (tilde(dst), "copy" if copy else "link -> " + tilde(home_dir)))
         return
     dst.parent.mkdir(parents=True, exist_ok=True)
+    note = ""
     if not copy:
         try:
             os.symlink(str(home_dir), str(dst), target_is_directory=True)
             plan.say("  %s: link -> %s" % (tilde(dst), tilde(home_dir)))
             return
         except (OSError, NotImplementedError):
-            pass  # e.g. Windows without symlink rights
+            # Windows without Developer Mode or admin rights
+            note = " (symlinks are not allowed here; run the installer again after updating)"
     shutil.copytree(str(home_dir), str(dst), ignore=IGNORE)
     write_mark(dst, "copy")
-    plan.say("  %s: copy" % tilde(dst))
+    plan.say("  %s: copy%s" % (tilde(dst), note))
 
 
 def unplace(plan, home_dir, dst):
@@ -205,7 +264,8 @@ def unplace(plan, home_dir, dst):
 # --------------------------------------------------------------------------- hooks
 
 def hook_cmd(home_dir, mode):
-    return '%s "%s" %s' % (PY, home_dir / "scripts" / "sci_hook.py", mode)
+    # Forward slashes: the same string works in sh, bash, cmd.exe and PowerShell, whichever runs the hook.
+    return '%s "%s" %s' % (python_cmd(), (home_dir / "scripts" / "sci_hook.py").as_posix(), mode)
 
 
 def claude_style_hooks(home_dir, tool_matcher):
@@ -467,10 +527,11 @@ def cmd_install(args, prefix, home_dir):
     print("")
     print("Done. Restart running agent sessions so they see the skill.")
     if not args.hooks and not any(hooks_present(a) for a in agents):
-        print("Optional: `python3 %s --hooks` adds hooks that re-orient the agent after context compaction and block "
-              "destructive git commands (only inside repos where `.sci/` exists)." % tilde(home_dir / "install.py"))
-    print("In a repository, the agent starts with: python3 %s init --objective \"<goal>\""
-          % tilde(home_dir / "scripts" / "sci.py"))
+        print("Optional: `%s %s --hooks` adds hooks that re-orient the agent after context compaction and block "
+              "destructive git commands (only inside repos where `.sci/` exists)."
+              % (python_cmd(), shell_path(home_dir / "install.py")))
+    print("In a repository, the agent starts with: %s %s init --objective \"<goal>\""
+          % (python_cmd(), shell_path(home_dir / "scripts" / "sci.py")))
     return 0
 
 

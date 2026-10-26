@@ -39,7 +39,16 @@ folder and generic DevSecOps/CI-CD material are gone.
 - `install.py`: installs the skill for every detected agent (Claude Code, Codex, Gemini CLI,
   Antigravity, OpenCode, pi, or any skills directory), with opt-in hooks, `--status` and
   `--uninstall`.
-- Test suites: `tests/test_sci.py` and `tests/test_install.py`.
+- Online installers: `install.sh` (`curl ... | sh`) for Linux, macOS, WSL and Git Bash, and
+  `install.ps1` (`irm ... | iex`, or curl.exe and `powershell -File` in cmd.exe) for Windows. Both
+  accept install.py's options, `SCI_REF` to pin a version and `SCI_SOURCE` to install offline.
+- Windows support: sci runs commands with Git Bash (never WSL's `bash.exe`), else cmd.exe, and the
+  new `shell` config key overrides it; `.sci\sci.cmd` launcher for cmd.exe and PowerShell; timeouts
+  kill the whole process tree; per-repo locking; UTF-8 output; hooks and printed commands call
+  `py -3`, `python` or `python3`, whichever really runs; the installed copy lives in
+  `~/.local/share` on every OS.
+- Test suites: `tests/test_sci.py`, `tests/test_install.py` and `tests/test_bootstrap.py`, run by
+  CI on Linux, macOS and Windows.
 
 ### Changed
 - `SKILL.md` rewritten as short imperative rules, a table mapping tool messages to actions, and a
