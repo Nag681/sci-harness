@@ -1,0 +1,3 @@
+# LF everywhere, including Windows checkouts: install.sh and the skill's shell launcher break with CRLF.
+* text=auto eol=lf
+*.png binary

@@ -1,8 +1,8 @@
-# software-engineer: a long-horizon harness for small coding models
+# sci-harness
 
-An [Agent Skill](https://agentskills.io) that helps small, cheap models (Haiku, Gemini Flash,
-GPT-OSS and similar) do long scientific and numerical coding tasks in large codebases without
-regressing. It is built for the ways small models fail on long tasks:
+The `software-engineer` [Agent Skill](https://agentskills.io): a long-horizon harness that helps small,
+cheap models (Haiku, Gemini Flash, GPT-OSS and similar) do long scientific and numerical coding tasks
+in large codebases without regressing. It is built for the ways small models fail on long tasks:
 
 | Failure | What the skill does |
 | --- | --- |
@@ -20,15 +20,30 @@ example session.
 
 ## Install
 
+You need Python 3.8+ and git.
+
+**Linux, macOS, WSL, Git Bash**
+
 ```bash
-python3 install.py            # every agent found on this machine; no config files are edited
-python3 install.py --hooks    # also add the hooks (writes a backup of each config first)
-python3 install.py --status   # what is installed where
-python3 install.py --uninstall
+curl -fsSL https://raw.githubusercontent.com/Nag681/sci-harness/main/install.sh | sh
 ```
 
-The installer copies this folder to `~/.local/share/agent-skills/software-engineer` and links it
-where each agent looks for skills:
+**Windows PowerShell**
+
+```powershell
+irm https://raw.githubusercontent.com/Nag681/sci-harness/main/install.ps1 | iex
+```
+
+**Windows Command Prompt**
+
+```bat
+curl -fsSLo %TEMP%\sci-install.ps1 https://raw.githubusercontent.com/Nag681/sci-harness/main/install.ps1 && powershell -NoProfile -ExecutionPolicy Bypass -File %TEMP%\sci-install.ps1
+```
+
+The installer downloads this repository, copies the skill to
+`~/.local/share/agent-skills/software-engineer` and links it where each agent on the machine looks
+for skills. It does not touch any agent configuration unless you ask for hooks. Run the same command
+again to update.
 
 | Agent | Skill location | Hooks (`--hooks`) |
 | --- | --- | --- |
@@ -39,18 +54,55 @@ where each agent looks for skills:
 | OpenCode, pi | `~/.agents/skills/` (OpenCode also reads `~/.claude/skills/`) | none |
 | anything else | `--target <skills dir>` | none |
 
-Other options:
+### Options
 
-- `--only claude,antigravity` limits the agents.
-- `--copy` copies instead of symlinking (used automatically where symlinks fail, such as on Windows
-  without developer mode).
-- `--project <repo>` copies the skill into a repository's `.claude/skills/` and `.agents/skills/` so
-  the team gets it.
-- `--remove-hooks` takes the hooks out and keeps the skill.
-- `--dry-run` shows the changes without making them.
+| Option | Effect |
+| --- | --- |
+| `--hooks` | also register the hooks (each config file is backed up first) |
+| `--remove-hooks` | take the hooks out, keep the skill |
+| `--status` | show what is installed where |
+| `--uninstall` | remove everything the installer added |
+| `--only claude,antigravity` | limit the agents |
+| `--copy` | copy instead of symlinking |
+| `--project <repo>` | copy the skill into a repository's `.claude/skills/` and `.agents/skills/` for the team |
+| `--target <dir>` | also install into another skills directory |
+| `--dry-run` | show the changes without making them |
+
+Pass options like this:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Nag681/sci-harness/main/install.sh | sh -s -- --hooks
+```
+
+```powershell
+$env:SCI_ARGS = "--hooks"; irm https://raw.githubusercontent.com/Nag681/sci-harness/main/install.ps1 | iex
+```
+
+In the Command Prompt, put them after the `.ps1` path. To install a tagged version instead of `main`,
+set `SCI_REF` first (`SCI_REF=v3.0.0` before `sh`, `$env:SCI_REF = "v3.0.0"` in PowerShell,
+`set "SCI_REF=v3.0.0" &&` in cmd.exe).
+
+From a clone, the same options work with `install.py` directly:
+
+```bash
+git clone https://github.com/Nag681/sci-harness
+python3 sci-harness/install.py --status
+```
 
 An existing copy of an older version is moved to `~/.local/share/agent-skills/backups/`, never
 deleted. Restart running agent sessions after installing.
+
+### Windows
+
+- Python: the installer from python.org or `winget install Python.Python.3.12`. The installer and
+  the hooks use `py -3`, `python` or `python3`, whichever really runs.
+- Without Developer Mode, Windows does not allow symlinks, so each agent gets a copy of the skill.
+  Run the installer again after updating.
+- The commands sci runs for you (`check`, `verify`, goldens, `run`) go through Git Bash, which comes
+  with Git for Windows. Write them with forward slashes and bash quoting:
+  `--verify "python -m pytest tests/test_heat.py -q"`. To use another shell:
+  `.sci/sci config set shell cmd` (or `pwsh`).
+- The tool is `.sci/sci` in PowerShell and Git Bash, and `.sci\sci` in the Command Prompt.
 
 ### What the hooks do
 
@@ -92,10 +144,18 @@ readable snapshot of the state.
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests          # sci, hooks and installer
+python3 -m unittest discover -s tests          # sci, hooks, install.py, install.sh, install.ps1
 SCI_TEST_PYTEST_PY=/path/to/python-with-pytest python3 -m unittest discover -s tests   # + pytest cases
 ```
+
+CI runs the suite on Linux, macOS and Windows (Python 3.8 and current), and runs the install
+one-liners above against every pushed commit. `install.sh` and `install.ps1` accept `SCI_SOURCE`
+(a local folder or archive) to install without downloading, and `GH_TOKEN` for private forks.
 
 Upgrading from 2.x: `sci.py init` imports tasks from an old `.agent/feature_list.json`. Delete the
 old `.agent/` folder afterwards, because Antigravity treats `.agent/` as a customization folder.
 See `CHANGELOG.md` for what changed.
+
+## License
+
+MIT

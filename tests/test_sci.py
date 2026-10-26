@@ -5,6 +5,7 @@ Every test builds a throwaway git repository with a tiny numerical package and d
 through its command line, exactly as an agent would.
 """
 import ast
+import base64
 import json
 import os
 import shlex
@@ -20,11 +21,19 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 SCI = HERE.parent / "scripts" / "sci.py"
 PY = sys.executable
+WINDOWS = os.name == "nt"
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(SCI.parent))
 import sci  # noqa: E402
 
-UT = "%s -m unittest" % shlex.quote(PY)
+
+def shq(path):
+    """A path quoted for the shell sci runs commands with: bash everywhere (Git Bash on Windows)."""
+    return shlex.quote(str(path).replace("\\", "/") if WINDOWS else str(path))
+
+
+PYQ = shq(PY)
+UT = "%s -m unittest" % PYQ
 
 CORE = '''\
 def scale(x, k=2.0):
@@ -68,7 +77,7 @@ class Sandbox(object):
 
     def git(self, *args):
         p = subprocess.run(["git"] + list(args), cwd=self.tmp, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                           universal_newlines=True)
+                           encoding="utf-8", errors="replace")
         if p.returncode != 0:
             raise AssertionError("git %s failed: %s" % (args, p.stdout))
         return p.stdout
@@ -76,11 +85,11 @@ class Sandbox(object):
     def write(self, rel, text):
         p = self.root / rel
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(textwrap.dedent(text) if text.startswith("\n") else text)
+        p.write_text(textwrap.dedent(text) if text.startswith("\n") else text, encoding="utf-8")
         return p
 
     def read(self, rel):
-        return (self.root / rel).read_text()
+        return (self.root / rel).read_text(encoding="utf-8")
 
     def sci(self, *args, **kw):
         exe = self.root / ".sci" / "sci.py"
@@ -89,7 +98,7 @@ class Sandbox(object):
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env.update(kw.get("env") or {})
         p = subprocess.run([PY, script] + list(args), cwd=str(kw.get("cwd") or self.root), env=env,
-                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding="utf-8", errors="replace",
                            timeout=kw.get("timeout", 120))
         return p.returncode, p.stdout
 
@@ -159,6 +168,10 @@ class TestInit(unittest.TestCase):
         self.assertIn("initialized", out)
         self.assertTrue((sb.root / ".sci" / "state.json").exists())
         self.assertTrue(os.access(str(sb.root / ".sci" / "sci"), os.X_OK))
+        self.assertNotIn(b"\r", (sb.root / ".sci" / "sci").read_bytes())  # a CRLF shebang breaks Git Bash
+        launcher = (sb.root / ".sci" / "sci.cmd").read_bytes()
+        self.assertIn(b"%~dp0sci.py", launcher)
+        self.assertEqual(launcher.count(b"\n"), launcher.count(b"\r\n"))  # batch files need CRLF
         self.assertEqual(sb.git("status", "--porcelain").strip(), "")
         self.assertIn("/.sci/", sb.read(".git/info/exclude"))
         self.assertIn("NEXT: Plan", out)
@@ -166,10 +179,40 @@ class TestInit(unittest.TestCase):
     def test_wrapper_runs_from_subdirectory(self):
         sb = Sandbox(self)
         sb.init()
-        p = subprocess.run([str(sb.root / ".sci" / "sci"), "resume"], cwd=str(sb.root / "pkg"),
-                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+        if WINDOWS:
+            launchers = [[str(sb.root / ".sci" / "sci.cmd")]]
+            if sci.windows_bash():
+                launchers.append([sci.windows_bash(), (sb.root / ".sci" / "sci").as_posix()])
+        else:
+            launchers = [[str(sb.root / ".sci" / "sci")]]
+        for argv in launchers:
+            p = subprocess.run(argv + ["resume"], cwd=str(sb.root / "pkg"), stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, encoding="utf-8", errors="replace", timeout=120)
+            self.assertEqual(p.returncode, 0, (argv, p.stdout))
+            self.assertIn("OBJECTIVE: Add an RK2 integrator", p.stdout)
+
+    @unittest.skipUnless(WINDOWS, "Windows launchers")
+    def test_powershell_and_cmd_find_the_launcher_and_get_exit_codes(self):
+        sb = Sandbox(self)
+        sb.init()
+        sb.ok("task", "add", "t", "--verify", "exit 1", "--scope", "x")
+        sb.ok("task", "start")
+
+        def run(argv, shell=False):
+            return subprocess.run(argv, shell=shell, cwd=str(sb.root), stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, encoding="utf-8", errors="replace", timeout=120)
+        for ps in [x for x in (shutil.which("powershell"), shutil.which("pwsh")) if x]:
+            p = run([ps, "-NoProfile", "-NonInteractive", "-Command", ".sci/sci resume; exit $LASTEXITCODE"])
+            self.assertEqual(p.returncode, 0, (ps, p.stdout))
+            self.assertIn("OBJECTIVE: Add an RK2 integrator", p.stdout)
+            p = run([ps, "-NoProfile", "-NonInteractive", "-Command", ".sci/sci check; exit $LASTEXITCODE"])
+            self.assertEqual(p.returncode, 1, (ps, p.stdout))
+            self.assertIn("FAIL check T1", p.stdout)
+        p = run(".sci\\sci resume", shell=True)
         self.assertEqual(p.returncode, 0, p.stdout)
         self.assertIn("OBJECTIVE: Add an RK2 integrator", p.stdout)
+        p = run(".sci\\sci check", shell=True)
+        self.assertEqual(p.returncode, 1, p.stdout)
 
     def test_reinit_keeps_state_and_restores_deleted_state_from_git_backup(self):
         sb = Sandbox(self)
@@ -195,7 +238,7 @@ class TestInit(unittest.TestCase):
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d, True)
         p = subprocess.run([PY, str(SCI), "init"], cwd=d, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                           universal_newlines=True)
+                           encoding="utf-8", errors="replace")
         self.assertEqual(p.returncode, 2)
         self.assertIn("REFUSED: Not inside a git repository", p.stdout)
 
@@ -454,7 +497,7 @@ class TestLoop(unittest.TestCase):
     def test_lock_with_test_runner_but_no_test_file(self):
         sb = Sandbox(self)
         sb.init()
-        sb.ok("task", "add", "refactor", "--verify", "%s -m pytest -q -k core" % shlex.quote(PY), "--scope", "pkg")
+        sb.ok("task", "add", "refactor", "--verify", "%s -m pytest -q -k core" % PYQ, "--scope", "pkg")
         sb.ok("task", "start")
         rc, out = sb.sci("lock")
         self.assertEqual(rc, 2, out)
@@ -535,7 +578,7 @@ class TestLoop(unittest.TestCase):
         sb.init()
         sb.ok("config", "set", "check_timeout", "2")
         marker = sb.root / "child_alive"
-        sb.ok("task", "add", "slow", "--verify", "(sleep 8; touch %s) & sleep 30" % shlex.quote(str(marker)),
+        sb.ok("task", "add", "slow", "--verify", "(sleep 8; touch %s) & sleep 30" % shq(marker),
               "--scope", "x")
         sb.ok("task", "start")
         t0 = time.time()
@@ -550,7 +593,7 @@ class TestLoop(unittest.TestCase):
         sb = Sandbox(self)
         sb.init()
         sb.write(".sci/scratch/probe.py", "from pkg.core import scale\nprint('scaled', scale(2.0))\n")
-        out = sb.ok("run", "%s .sci/scratch/probe.py" % shlex.quote(PY))
+        out = sb.ok("run", "%s .sci/scratch/probe.py" % PYQ)
         self.assertIn("scaled 4.0", out)
         self.assertIn("run ", out)
 
@@ -638,7 +681,7 @@ class TestGoldenAndBaseline(unittest.TestCase):
     def test_golden_detects_changed_numbers(self):
         sb = Sandbox(self)
         sb.init()
-        out = sb.ok("golden", "add", "euler", "--cmd", "%s demo.py" % shlex.quote(PY), "--rtol", "1e-12")
+        out = sb.ok("golden", "add", "euler", "--cmd", "%s demo.py" % PYQ, "--rtol", "1e-12")
         self.assertIn("4 numbers", out)
         sb.ok("golden", "check")
         sb.write("pkg/core.py", sb.read("pkg/core.py").replace("y + dt * (-rate * y)", "y + dt * (-rate * y) * 1.0000001"))
@@ -657,7 +700,7 @@ class TestGoldenAndBaseline(unittest.TestCase):
     def test_golden_refuses_nondeterministic_output(self):
         sb = Sandbox(self)
         sb.init()
-        rc, out = sb.sci("golden", "add", "noisy", "--cmd", "%s -c 'import random; print(random.random())'" % shlex.quote(PY))
+        rc, out = sb.sci("golden", "add", "noisy", "--cmd", "%s -c 'import random; print(random.random())'" % PYQ)
         self.assertEqual(rc, 2)
         self.assertIn("not reproducible", out)
 
@@ -737,7 +780,7 @@ class TestResumeAndHandoff(unittest.TestCase):
     def test_report_lists_review_items(self):
         sb = Sandbox(self)
         sb.finish_rk2()
-        sb.ok("golden", "add", "e", "--cmd", "%s demo.py" % shlex.quote(PY))
+        sb.ok("golden", "add", "e", "--cmd", "%s demo.py" % PYQ)
         sb.ok("golden", "retol", "e", "--rtol", "1e-2", "--reason", "testing the report output")
         out = sb.ok("report")
         self.assertIn("NEEDS YOUR REVIEW", out)
@@ -820,11 +863,31 @@ class TestUnits(unittest.TestCase):
         self.assertTrue(sci.match_any("tests/unit/a.py", ["tests/**"]))
 
     def test_source_is_python38_compatible(self):
-        src = SCI.read_text()
-        ast.parse(src, feature_version=(3, 8))
-        hook = SCI.parent / "sci_hook.py"
-        if hook.exists():
-            ast.parse(hook.read_text(), feature_version=(3, 8))
+        for path in (SCI, SCI.parent / "sci_hook.py", HERE.parent / "install.py"):
+            ast.parse(path.read_text(encoding="utf-8"), feature_version=(3, 8))
+
+    def test_shell_selection_and_override(self):
+        self.assertEqual(sci.shell_argv({"shell": "cmd"}, "echo hi"), ("echo hi", True))
+        self.assertEqual(sci.shell_argv({"shell": "/opt/zsh"}, "x"), (["/opt/zsh", "-c", "x"], False))
+        args, use_shell = sci.shell_argv({"shell": "pwsh"}, "echo 'é'")
+        self.assertFalse(use_shell)
+        self.assertEqual(args[:4], ["pwsh", "-NoProfile", "-NonInteractive", "-EncodedCommand"])
+        self.assertEqual(base64.b64decode(args[4]).decode("utf-16-le"), "echo 'é'")
+        args, use_shell = sci.shell_argv({}, "x")
+        if WINDOWS and not sci.windows_bash():
+            self.assertTrue(use_shell)
+        else:
+            self.assertIn(os.path.basename(args[0]).lower(), ("bash", "bash.exe", "sh"))
+            self.assertNotIn("system32", args[0].lower())  # never WSL's bash.exe
+
+    def test_windows_backslash_paths_in_verify_commands(self):
+        old = sci.WINDOWS
+        sci.WINDOWS = True
+        try:
+            self.assertEqual(sci.verify_tokens("python -m pytest tests\\test_a.py -q"),
+                             ["python", "-m", "pytest", "tests/test_a.py", "-q"])
+        finally:
+            sci.WINDOWS = old
 
 
 class TestSnapshot(unittest.TestCase):
@@ -858,12 +921,12 @@ class TestRealPytest(unittest.TestCase):
         sb.write("tests/test_a.py", "def test_good():\n    assert 1 == 1\n\ndef test_bad():\n    assert 1 == 2\n")
         sb.git("add", "-A")
         sb.git("commit", "-q", "-m", "a")
-        sb.init(test_cmd="%s -m pytest -q" % shlex.quote(PYTEST_PY))
-        sb.ok("config", "set", "regress_cmd", "%s -m pytest -q tests" % shlex.quote(PYTEST_PY))
+        sb.init(test_cmd="%s -m pytest -q" % shq(PYTEST_PY))
+        sb.ok("config", "set", "regress_cmd", "%s -m pytest -q tests" % shq(PYTEST_PY))
         out = sb.ok("baseline")
         self.assertIn("1 pre-existing failures", out)
         self.assertEqual(sb.state()["baseline"]["failures"], ["tests/test_a.py::test_bad"])
-        sb.ok("task", "add", "t", "--verify", "%s -m pytest -q tests/test_core.py" % shlex.quote(PYTEST_PY),
+        sb.ok("task", "add", "t", "--verify", "%s -m pytest -q tests/test_core.py" % shq(PYTEST_PY),
               "--scope", "pkg/core.py")
         sb.ok("task", "start")
         out = sb.ok("verify")
@@ -875,9 +938,9 @@ class TestRealPytest(unittest.TestCase):
 
     def test_pytest_failure_report_is_compact(self):
         sb = Sandbox(self)
-        sb.init(test_cmd="%s -m pytest -q" % shlex.quote(PYTEST_PY))
+        sb.init(test_cmd="%s -m pytest -q" % shq(PYTEST_PY))
         sb.write("tests/test_f.py", "import math\n\ndef test_f():\n    assert math.isclose(0.1 + 0.2, 0.31)\n")
-        sb.ok("task", "add", "t", "--verify", "%s -m pytest -q tests/test_f.py" % shlex.quote(PYTEST_PY),
+        sb.ok("task", "add", "t", "--verify", "%s -m pytest -q tests/test_f.py" % shq(PYTEST_PY),
               "--scope", "pkg/core.py")
         sb.ok("task", "start")
         rc, out = sb.sci("check")
@@ -886,6 +949,7 @@ class TestRealPytest(unittest.TestCase):
         self.assertIn("1 failed", out)
         self.assertLess(len(out.splitlines()), 60)
 
+    @unittest.skipIf(WINDOWS, "symlinked POSIX venv layout")
     def test_lock_never_locks_the_interpreter(self):
         sb = Sandbox(self)
         os.symlink(os.path.dirname(os.path.dirname(os.path.abspath(PYTEST_PY))), str(sb.root / ".venv"))
@@ -896,6 +960,7 @@ class TestRealPytest(unittest.TestCase):
         self.assertIn("Locked for T1: tests/test_core.py", out)
         self.assertNotIn("python", out.splitlines()[0])
 
+    @unittest.skipIf(WINDOWS, "symlinked POSIX venv layout")
     def test_detects_project_venv(self):
         sb = Sandbox(self)
         os.symlink(os.path.dirname(os.path.dirname(os.path.abspath(PYTEST_PY))), str(sb.root / ".venv"))
@@ -925,10 +990,6 @@ class TestBuild(unittest.TestCase):
         self.assertEqual(sb.read("build.log").count("built"), 2)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 HOOK = SCI.parent / "sci_hook.py"
 sys.path.insert(0, str(HOOK.parent))
 import sci_hook  # noqa: E402
@@ -937,7 +998,7 @@ import sci_hook  # noqa: E402
 class TestHooks(unittest.TestCase):
     def hook(self, mode, payload, cwd=None):
         p = subprocess.run([PY, str(HOOK), mode], input=json.dumps(payload), cwd=cwd or tempfile.gettempdir(),
-                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, timeout=30)
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding="utf-8", errors="replace", timeout=30)
         self.assertEqual(p.returncode, 0, p.stdout)
         return p.stdout
 
@@ -953,6 +1014,18 @@ class TestHooks(unittest.TestCase):
             self.assertIsNotNone(sci_hook.destructive_reason(c), c)
         for c in good:
             self.assertIsNone(sci_hook.destructive_reason(c), c)
+
+    def test_windows_shell_deletes_and_file_uris(self):
+        for c in ("Remove-Item -Recurse -Force .sci", "rd /s /q .sci", "del .sci\\state.json",
+                  "remove-item .\\.sci\\state.json", "rmdir /s .sci"):
+            self.assertIsNotNone(sci_hook.destructive_reason(c), c)
+        for c in ("Remove-Item build", "rd /s /q build", "del .scikit", "Remove-Item src\\.scipy"):
+            self.assertIsNone(sci_hook.destructive_reason(c), c)
+        self.assertEqual(sci_hook.uri_path("/plain/path"), "/plain/path")
+        if WINDOWS:
+            self.assertEqual(sci_hook.uri_path("file:///C:/work/my%20repo"), "C:\\work\\my repo")
+        else:
+            self.assertEqual(sci_hook.uri_path("file:///home/me/my%20repo"), "/home/me/my repo")
 
     def test_agy_hooks_are_neutral_outside_sci_repos(self):
         d = tempfile.mkdtemp()

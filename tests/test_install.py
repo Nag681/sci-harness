@@ -13,6 +13,23 @@ HERE = Path(__file__).resolve().parent
 INSTALL = HERE.parent / "install.py"
 PY = sys.executable
 NAME = "software-engineer"
+WINDOWS = os.name == "nt"
+MARK = ".sci-install.json"
+
+
+def isolated_env(home, path_dirs):
+    """Environment with a throwaway home and only the given PATH entries, so real agents stay invisible."""
+    env = {"HOME": str(home), "USERPROFILE": str(home), "PYTHONDONTWRITEBYTECODE": "1"}
+    if WINDOWS:
+        for k in ("SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP"):
+            if os.environ.get(k):
+                env[k] = os.environ[k]
+        path_dirs = list(path_dirs) + [os.path.dirname(PY),
+                                       os.path.join(os.environ.get("SYSTEMROOT", r"C:\Windows"), "System32")]
+    else:
+        path_dirs = list(path_dirs) + ["/usr/bin", "/bin"]
+    env["PATH"] = os.pathsep.join(str(d) for d in path_dirs)
+    return env
 
 
 class Home(object):
@@ -22,16 +39,19 @@ class Home(object):
         self.bin = self.root / "bin"
         self.bin.mkdir()
         for a in agents:
-            stub = self.bin / a
-            stub.write_text("#!/bin/sh\nexit 0\n")
-            stub.chmod(0o755)
+            if WINDOWS:
+                (self.bin / (a + ".cmd")).write_text("@exit /b 0\r\n")
+            else:
+                stub = self.bin / a
+                stub.write_text("#!/bin/sh\nexit 0\n")
+                stub.chmod(0o755)
         self.home = self.root / "home"
         self.home.mkdir()
 
     def run(self, *args):
-        env = {"HOME": str(self.home), "PATH": "%s:/usr/bin:/bin" % self.bin, "PYTHONDONTWRITEBYTECODE": "1"}
-        p = subprocess.run([PY, str(INSTALL)] + list(args), env=env, stdout=subprocess.PIPE,
-                           stderr=subprocess.STDOUT, universal_newlines=True, timeout=120)
+        p = subprocess.run([PY, str(INSTALL)] + list(args), env=isolated_env(self.home, [self.bin]),
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding="utf-8", errors="replace",
+                           timeout=120)
         if p.returncode != 0:
             raise AssertionError("install.py %s exited %d:\n%s" % (" ".join(args), p.returncode, p.stdout))
         return p.stdout
@@ -40,11 +60,21 @@ class Home(object):
         return self.home / rel
 
     def json(self, rel):
-        return json.loads(self.p(rel).read_text())
+        return json.loads(self.p(rel).read_text(encoding="utf-8"))
 
     def write_json(self, rel, data):
         self.p(rel).parent.mkdir(parents=True, exist_ok=True)
-        self.p(rel).write_text(json.dumps(data, indent=2))
+        self.p(rel).write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    def assert_provides(self, testcase, rel):
+        """rel holds the skill: a link to the installed copy, or (Windows without symlink rights) a marked copy."""
+        dst, installed = self.p(rel), self.p(".local/share/agent-skills/" + NAME)
+        if os.path.islink(str(dst)):
+            testcase.assertEqual(os.path.realpath(str(dst)), os.path.realpath(str(installed)), rel)
+        else:
+            testcase.assertTrue(WINDOWS, "%s should be a symlink" % rel)
+            testcase.assertTrue((dst / MARK).is_file(), rel)
+        testcase.assertTrue((dst / "SKILL.md").is_file(), rel)
 
 
 def our_commands(events):
@@ -64,18 +94,23 @@ class TestInstall(unittest.TestCase):
         installed = h.p(".local/share/agent-skills/" + NAME)
         self.assertTrue((installed / "SKILL.md").is_file())
         self.assertTrue((installed / "scripts" / "sci.py").is_file())
-        self.assertTrue((installed / ".sci-install.json").is_file())
+        self.assertTrue((installed / MARK).is_file())
+        for repo_only in ("tests", "install.sh", "install.ps1", ".github", ".gitattributes"):
+            self.assertFalse((installed / repo_only).exists(), repo_only)
         for rel in (".claude/skills/" + NAME, ".agents/skills/" + NAME):
-            self.assertTrue(os.path.islink(str(h.p(rel))), rel)
-            self.assertEqual(os.path.realpath(str(h.p(rel))), os.path.realpath(str(installed)))
+            h.assert_provides(self, rel)
         plugin = h.p(".gemini/config/plugins/" + NAME)
-        self.assertEqual(json.loads((plugin / "plugin.json").read_text())["version"], "3.0.0")
+        self.assertEqual(json.loads((plugin / "plugin.json").read_text(encoding="utf-8"))["version"], "3.0.0")
         self.assertTrue((plugin / "skills" / NAME / "SKILL.md").is_file())
         self.assertFalse((plugin / "hooks.json").exists())
         self.assertFalse(h.p(".claude/settings.json").exists())
         self.assertFalse(h.p(".gemini/settings.json").exists())
         self.assertIn("--hooks", out)
-        self.assertIn("already linked", h.run())  # idempotent
+        again = h.run()  # idempotent
+        if os.path.islink(str(h.p(".claude/skills/" + NAME))):
+            self.assertIn("already linked", again)
+        h.assert_provides(self, ".claude/skills/" + NAME)
+        self.assertFalse(h.p(".local/share/agent-skills/backups").exists())  # nothing of ours is backed up
 
     def test_only_and_dry_run(self):
         h = Home(self)
@@ -138,11 +173,19 @@ class TestInstall(unittest.TestCase):
         self.addCleanup(shutil.rmtree, neutral, True)
         cmds = our_commands(h.json(".claude/settings.json")["hooks"]) + \
             our_commands(h.json(".gemini/settings.json")["hooks"])
+        self.assertTrue(cmds)
         for cmd in cmds:
-            p = subprocess.run(["sh", "-c", cmd], input=json.dumps({"cwd": neutral}), stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT, universal_newlines=True, timeout=60)
-            self.assertEqual(p.returncode, 0, (cmd, p.stdout))
-            self.assertIn(p.stdout.strip(), ("", "{}"), cmd)
+            self.assertNotIn("\\", cmd)  # one string that works in sh, bash, cmd.exe and PowerShell
+            shells = [{"args": cmd, "shell": True}]  # /bin/sh, or cmd.exe on Windows
+            if WINDOWS and (shutil.which("powershell") or shutil.which("pwsh")):
+                ps = shutil.which("powershell") or shutil.which("pwsh")
+                shells.append({"args": [ps, "-NoProfile", "-NonInteractive", "-Command", cmd], "shell": False})
+            for how in shells:
+                p = subprocess.run(how["args"], shell=how["shell"], input=json.dumps({"cwd": neutral}),
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding="utf-8",
+                                   errors="replace", timeout=60)
+                self.assertEqual(p.returncode, 0, (cmd, p.stdout))
+                self.assertIn(p.stdout.strip(), ("", "{}"), (how, p.stdout))
 
     def test_replaces_old_versions_but_not_other_skills(self):
         h = Home(self)
@@ -158,11 +201,11 @@ class TestInstall(unittest.TestCase):
         out = h.run()
         self.assertIn("SKIPPED", out)
         self.assertEqual((other / "SKILL.md").read_text(), "---\nname: someone-elses-skill\n---\n")
-        self.assertTrue(os.path.islink(str(old_copy)))
+        h.assert_provides(self, ".claude/skills/" + NAME)
         backups = sorted(p.name for p in h.p(".local/share/agent-skills/backups").iterdir())
         self.assertEqual(len(backups), 2, backups)
         self.assertTrue(any(b.startswith("antigravity-plugin-") for b in backups))
-        self.assertTrue((old_plugin / ".sci-install.json").is_file())
+        self.assertTrue((old_plugin / MARK).is_file())
 
     def test_copy_mode_and_project(self):
         h = Home(self, agents=("claude",))
@@ -171,7 +214,7 @@ class TestInstall(unittest.TestCase):
         h.run("--copy", "--project", str(proj))
         dst = h.p(".claude/skills/" + NAME)
         self.assertFalse(os.path.islink(str(dst)))
-        self.assertTrue((dst / ".sci-install.json").is_file())
+        self.assertTrue((dst / MARK).is_file())
         for sub in (".claude/skills", ".agents/skills"):
             self.assertTrue((proj / sub / NAME / "SKILL.md").is_file())
         h.run("--uninstall", "--project", str(proj))

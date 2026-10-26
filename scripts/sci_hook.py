@@ -22,10 +22,20 @@ def read_payload():
     try:
         if sys.stdin is None or sys.stdin.isatty():
             return {}
-        data = sys.stdin.read()
+        data = sys.stdin.buffer.read().decode("utf-8", "replace")  # agents send UTF-8 whatever the code page
         return json.loads(data) if data.strip() else {}
     except Exception:
         return {}
+
+
+def uri_path(c):
+    """Filesystem path from a path or a file:// URI (file:///C:/x on Windows, file:///home/x elsewhere)."""
+    if not c.startswith("file://"):
+        return c
+    from urllib.parse import urlparse
+    from urllib.request import url2pathname
+    u = urlparse(c)
+    return url2pathname(("//" + u.netloc if u.netloc else "") + u.path)
 
 
 def find_root(payload, extra=None):
@@ -45,9 +55,7 @@ def find_root(payload, extra=None):
             cands.append(os.environ[key])
     cands.append(os.getcwd())
     for c in cands:
-        if c.startswith("file://"):
-            c = c[7:]
-        p = Path(c).expanduser()
+        p = Path(uri_path(c)).expanduser()
         for d in [p] + list(p.parents):
             if (d / ".sci" / "state.json").exists():
                 return d
@@ -111,7 +119,8 @@ def destructive_reason(cmd):
                 return "git switch --discard-changes"
             if re.search(r"\supdate-ref\s.*refs/sci", s):
                 return "deleting sci refs"
-        if re.search(r"(^|\s)rm\s", s) and re.search(r"(^|[\s/'\"])\.sci(/|\s|'|\"|$)", s):
+        if (re.search(r"(^|\s)(rm|rmdir|rd|del|erase|ri|remove-item)\s", s, re.I)
+                and re.search(r"(^|[\s/\\'\"])\.sci([/\\\s'\"]|$)", s)):
             return "deleting .sci"
     return None
 
@@ -166,7 +175,7 @@ def stop_decision(root, st, payload):
         return {}
     hs_path = root / ".sci" / "hook_state.json"
     try:
-        hs = json.loads(hs_path.read_text())
+        hs = json.loads(hs_path.read_text(encoding="utf-8"))
     except Exception:
         hs = {}
     if hs.get("updated") != st.get("updated"):
@@ -175,7 +184,7 @@ def stop_decision(root, st, payload):
         return {}
     hs["streak"] = hs.get("streak", 0) + 1
     try:
-        hs_path.write_text(json.dumps(hs))
+        hs_path.write_text(json.dumps(hs), encoding="utf-8")
     except Exception:
         pass
     return {"decision": "continue",
@@ -186,6 +195,11 @@ def stop_decision(root, st, payload):
 def main(argv):
     mode = argv[1] if len(argv) > 1 else "plain"
     extra = argv[2] if len(argv) > 2 else None
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # agents read hook output as UTF-8
+        except Exception:
+            pass
     payload = read_payload()
     json_neutral = mode.startswith(("agy-", "gemini-"))  # these harnesses expect a JSON object on stdout
     try:

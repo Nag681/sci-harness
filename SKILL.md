@@ -10,8 +10,9 @@ description: >-
   models (Haiku, Gemini Flash, GPT-OSS) and works with any model.
 license: MIT
 compatibility: >-
-  Needs git and Python 3.8+ (standard library only); any test runner. Works in any agent that can
-  run shell commands (Claude Code, Codex, Gemini CLI, Antigravity, OpenCode, pi, Cursor).
+  Needs git and Python 3.8+ (standard library only); any test runner. Linux, macOS and Windows.
+  Works in any agent that can run shell commands (Claude Code, Codex, Gemini CLI, Antigravity,
+  OpenCode, pi, Cursor).
 allowed-tools: Bash Read Write Edit Glob Grep
 metadata:
   version: "3.0.0"
@@ -35,7 +36,8 @@ Run every command from the repository root.
   **Do what `NEXT:` says.**
 - If it fails with `No such file or directory`, this repo is new to the harness:
   `python3 <this-skill-folder>/scripts/sci.py init --objective "<the user's goal in one line>"`
-  (folder unknown? It is usually `~/.local/share/agent-skills/software-engineer`; otherwise
+  (Windows: `py -3` or `python` instead of `python3`. Folder unknown? It is usually
+  `~/.local/share/agent-skills/software-engineer`; otherwise
   `find ~ -path '*software-engineer/scripts/sci.py' 2>/dev/null | head -1`)
 - Run `.sci/sci resume` again after any summary or compaction, after finishing a task, whenever
   you are unsure, and at least every ~20 tool calls.
@@ -99,6 +101,8 @@ Run every command from the repository root.
 - Experiments and probes: `.sci/sci run "python3 .sci/scratch/probe.py"` (repo on PYTHONPATH,
   output logged as evidence). Keep scratch files in `.sci/scratch/`; they are never committed.
 - Undo: `.sci/sci restore` (back to the last PASS), `--to start`, or `--paths <file>`.
+- sci runs `--verify`, `--cmd` and `run` commands with bash (Git Bash on Windows): use forward
+  slashes and bash quoting in them, even when your own shell is PowerShell.
 
 ## 5. When the tool says...
 
