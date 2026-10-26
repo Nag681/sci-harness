@@ -53,7 +53,7 @@ curl -fsSLo %TEMP%\sci.ps1 https://raw.githubusercontent.com/Nag681/sci-harness/
    *"Use the software-engineer skill to add an RK2 integrator to the orbit solver."*
    In Claude Code you can also type `/software-engineer`.
 3. **Let it work.** The agent splits the goal into small tasks. For each one it writes a failing test, locks
-   it, makes it pass and commits.
+   it, makes it pass and commits ([step by step](#step-by-step)).
 
 Check in whenever you like:
 
@@ -118,19 +118,170 @@ Attempt saved: .sci/attempts/T1-strike3-1793030073.patch
 
 ## How it works
 
+sci-harness has three parts:
+
+| Part | What it is | Its job |
+| --- | --- | --- |
+| 📓 **Notebook** | the `.sci/` folder in your project | remembers the goal, the tasks, every result and everything learned, even after the agent's memory is wiped |
+| ⚖️ **Referee** | the program `.sci/sci` | runs the tests, records the results, refuses shortcuts and ends every answer with a `NEXT:` step |
+| 📋 **Rulebook** | [`SKILL.md`](SKILL.md) | tells the agent to trust the referee over its own memory, never to weaken a test, and to stop guessing after 3 failed fixes |
+
+The agent writes the code; sci never does. It checks, records and, when asked, undoes. Optional
+[hooks](#reference) (off by default) also repeat a short reminder of the plan every turn and block git
+commands that destroy work.
+
 ```mermaid
-flowchart LR
-    R([resume]) --> S[start task] --> F[test fails] --> L[lock test] --> E[edit + check] --> V[verify] --> D["done: commit"]
-    D --> S
-    E -- 3 failed fixes --> H["STOP: test hypotheses"] --> E
+flowchart TD
+    A(["init: set up .sci/"]) --> B["plan: notes, goldens, baseline, 3-12 tasks"]
+    B --> C["start the next task"]
+    C --> D["write the acceptance test"]
+    D --> E{"check"}
+    E -- "FAIL: feature missing" --> F["lock the test"]
+    E -- "PASS: pure refactor" --> F
+    F --> G["edit the code"]
+    G --> H{"check"}
+    H -- "FAIL" --> K["strike, attempt saved"]
+    K -- "strike 1 or 2" --> G
+    K -- "strike 3" --> S["STOP: hypotheses and experiments"]
+    S --> G
+    K -- "strike 3, second time" --> X["ESCALATE: start over or ask you"]
+    H -- "PASS" --> V{"verify"}
+    V -- "FAIL" --> G
+    V -- "PASS" --> Z["done: commit, protect the tests"]
+    Z --> C
 ```
 
-- **One small tool.** [`scripts/sci.py`](scripts/sci.py) is a single standard-library Python file. Its state lives
-  in `<repo>/.sci/`, which is never committed.
-- **Clear rules.** [`SKILL.md`](SKILL.md) tells the agent which command to run when. [`references/`](references/)
-  holds test templates and a [worked example](references/worked-example.md).
-- **Optional hooks** brief the agent again after compaction and block destructive git commands. They stay off
-  unless you install with `--hooks`.
+### Step by step
+
+The running example: the goal is *"Add an RK2 integrator to the orbit solver"*. RK2 is a more accurate way to move
+a simulation forward in time than the simple Euler method the code uses now. Every command below is run as
+`.sci/sci <command>` from the repository root.
+
+1. **Set up** (once per project): `python3 <skill folder>/scripts/sci.py init --objective "..."`
+   - sci creates `.sci/` and tells git to ignore it, so it is never committed.
+   - It finds your test command (for example `pytest`) and saves a map of the code.
+   - On `main`, it suggests a separate git branch.
+
+2. **Plan** (before any code changes)
+   - The agent explores the code (`map`, `find`) and writes facts down, for example
+     `note "positions are in metres, time in seconds"`.
+   - **Goldens:** it saves the numbers the program prints today, such as the final orbit position. Later, sci
+     reruns that command and compares every number to about 12 significant digits, so a change in the results
+     never goes unnoticed.
+   - **Baseline:** it runs your test suite once and records which tests already fail. From then on, only *new*
+     failures count against the agent.
+   - **Tasks:** it splits the goal into 3–12 small tasks. Each task gets a *verify command* (one command that
+     passes only when the task is done), a *scope* (the files it may change), optional *invariants* (facts that
+     must stay true, like "energy is conserved") and optional *dependencies* (T2 waits for T1).
+
+3. **Start a task**: `task start`
+   - sci picks the first task whose dependencies are done and takes a snapshot of every file: the task's start
+     point.
+
+4. **Write a failing test first**: `check`
+   - The agent writes the *acceptance test*, the test that proves the task works, and runs `check`.
+   - For a new feature the result must be **FAIL**: the feature doesn't exist yet, and a test that already passes
+     proves nothing. For a pure clean-up that shouldn't change behavior, PASS is expected.
+
+5. **Lock the test**: `lock`
+   - sci saves a fingerprint and a copy of the test file. If that file changes in any way, every later check
+     counts as FAIL, even when the tests pass. The agent can't make the exam easier.
+   - If the test itself is wrong, the agent must `unlock` it with a written reason, and that always lands on
+     your review list.
+
+6. **Fix the code in small steps**: edit, `check`, edit, `check`, …
+   - **PASS:** sci saves the files as a restore point and resets the strike counter.
+   - **FAIL after a code change:** one *strike*, and the attempt is saved as a patch in `.sci/attempts/`, so no
+     work is ever lost. Failures before the lock, or rerunning without changing anything, don't count.
+   - sci warns when the change grows past 400 lines or touches files outside the task's scope.
+   - `restore` undoes: back to the last PASS, or to the task's start. It saves the current version as a patch
+     first and always puts locked tests back exactly.
+
+7. **Stuck? STOP and think** (after 3 strikes in a row)
+   - sci prints **STOP**: no more code edits. The agent writes at least two possible causes (`hyp add`), tests
+     each with a small experiment (`run`), and marks them refuted or confirmed with the evidence.
+   - STOP lifts once there are two new hypotheses and at least one has been tested, or when a check passes.
+   - If 3 more fixes fail after that (6 in all), sci says **ESCALATE**: start the task over with a different
+     approach, or block it and ask you.
+   - Refuted causes appear as *RULED OUT* in every later briefing, so the agent never retries a dead end.
+
+8. **Check everything**: `verify` runs these in order and stops at the first failure:
+   1. the guard: the locked test is untouched, tests from finished tasks are untouched, no other test was
+      weakened (an added skip, a deleted assert, a looser tolerance, a changed expected number, an `assert True`),
+      and nobody edited the task list by hand
+   2. the build, for compiled code
+   3. this task's verify command
+   4. the verify command of every finished task, so new work can't break old work (a *regression*)
+   5. every golden
+   6. the whole test suite, compared with the baseline
+
+   sci remembers exactly which file contents passed. `verify --quick` runs only the first three steps.
+
+9. **Finish**: `done -m "summary"`
+   - sci refuses unless the full verify passed on exactly the current files (edit anything afterwards and you
+     verify again), the test is locked, nothing changed outside the scope and no debugger statements are left.
+     A justified change outside the scope is allowed, but it lands on your review list.
+   - Then it commits only this task's files, tagged `[T1]`, and the task's tests become *protected*: every later
+     task is checked against them.
+
+10. **Repeat, and recover at any time**
+    - `NEXT:` names the next task. After a memory wipe, `resume` prints the goal, the task list, the active task,
+      the last result, ruled-out causes, notes and the next step. `.sci/HANDOFF.md` holds the same in a readable
+      form.
+    - When every task is done: a final `verify`, then `report` for you, with everything that needs your review.
+
+### How sci picks the next step
+
+Every command ends with a `NEXT:` line. sci takes the first row that applies:
+
+| Situation | `NEXT:` tells the agent to… |
+| --- | --- |
+| the harness is paused | wait (`.sci/sci unpause` resumes) |
+| no goal yet | set the objective |
+| no tasks yet | explore, add 3–12 tasks and record the baseline |
+| STOP is active | write and test hypotheses (ESCALATE on the second STOP) |
+| a locked or protected test was changed | undo that change |
+| the test isn't locked yet | write the acceptance test, `check`, then `lock` |
+| the last check failed | fix the code, not the tests (strike n/3) |
+| the checks pass | run `verify` (again, if files changed since) |
+| verified | run `done` |
+| no task is active | start the next task whose dependencies are done |
+| every task is done | run a final `verify`, then `report` |
+| only blocked tasks are left | ask you their questions |
+
+### What's inside `.sci/`
+
+| Path | Holds |
+| --- | --- |
+| `state.json` | the plan: goal, tasks, locks, hypotheses, notes, goldens |
+| `HANDOFF.md` | a readable summary, rewritten after every change |
+| `events.jsonl` | a diary of everything that happened |
+| `runs/` | the full output of every command sci ran |
+| `attempts/` | failed and undone attempts, as patches |
+| `golden/` | the saved reference numbers |
+| `scratch/` | the agent's experiments (never committed) |
+
+`.sci/` is listed in `.git/info/exclude`, so it never lands in a commit. sci also keeps a backup of the plan and
+settings inside `.git/`: if `.sci/` gets deleted, running `init` again brings them back.
+
+<details>
+<summary><b>Words used above</b></summary>
+
+| Word | Meaning |
+| --- | --- |
+| agent | an AI that edits code and runs commands for you (Claude Code, Codex, …) |
+| context compaction | an agent can only see so much text at once; in a long session, older parts get summarized and details are lost |
+| acceptance test | the test that proves a task is done |
+| regression | something that used to work and now doesn't |
+| golden output | saved "known good" numbers that later runs are compared with |
+| tolerance | how far two numbers may differ and still count as equal (computer arithmetic with decimals is never exact) |
+| invariant | something that must stay true, like conserved energy or a positive mass |
+| snapshot, restore point | a record of the exact content of every file at one moment |
+| patch | a file that describes changes; `git apply <patch>` brings them back |
+| scope | the files a task is allowed to change |
+| commit | a saved version in git's history |
+
+</details>
 
 ## Supported agents
 
