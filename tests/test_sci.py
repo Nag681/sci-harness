@@ -215,10 +215,21 @@ class TestInit(unittest.TestCase):
         self.assertEqual(p.returncode, 1, p.stdout)
         p = run(".sci\\sci task show T99", shell=True)
         self.assertEqual(p.returncode, 2, p.stdout)  # REFUSED
-        p = run(".sci\\sci purge --yes", shell=True)  # deletes the running launcher
-        self.assertEqual(p.returncode, 0, p.stdout)
-        self.assertNotIn("cannot be found", p.stdout)
-        self.assertFalse((sb.root / ".sci").exists())
+        # purge deletes the running launcher: from cmd.exe, a calling batch file and PowerShell
+        sb.write("purge.cmd", "@echo off\ncall .sci\\sci purge --yes\necho after purge: %errorlevel%\n")
+        purges = [(".sci\\sci purge --yes", True), ("purge.cmd", True)]
+        purges += [([ps, "-NoProfile", "-NonInteractive", "-Command", ".sci/sci purge --yes; exit $LASTEXITCODE"], False)
+                   for ps in (shutil.which("powershell"), shutil.which("pwsh")) if ps]
+        for i, (argv, shell) in enumerate(purges):
+            if i:
+                sb.init()
+            p = run(argv, shell=shell)
+            self.assertEqual(p.returncode, 0, (argv, p.stdout))
+            self.assertIn("Removed .sci/", p.stdout)
+            self.assertNotIn("cannot", p.stdout)  # "The system cannot find the path specified."
+            self.assertFalse((sb.root / ".sci").exists(), argv)
+            if argv == "purge.cmd":
+                self.assertIn("after purge: 0", p.stdout)  # the caller keeps running
 
     def test_reinit_keeps_state_and_restores_deleted_state_from_git_backup(self):
         sb = Sandbox(self)

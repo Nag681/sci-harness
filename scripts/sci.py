@@ -1502,7 +1502,8 @@ exit 127
 
 # For cmd.exe and PowerShell, which find .sci/sci.cmd when told to run .sci/sci. The interpreter that ran
 # `init` comes first. The last line runs sci and exits with an explicit code: a bare `exit /b` makes `cmd /c`
-# (how PowerShell runs .cmd files) report 0, and nothing more is read from the file, which purge deletes.
+# (how PowerShell runs .cmd files) report 0. After `purge` this file is gone and cmd.exe would fail reading on
+# ("The system cannot find the path specified."), so `(goto) 2>nul` ends the batch first and a child cmd sets the code.
 SCI_CMD_WRAPPER = "\r\n".join([
     "@echo off",
     "rem sci launcher (generated). Usage: .sci\\sci COMMAND   (see: .sci\\sci help)",
@@ -1514,8 +1515,10 @@ SCI_CMD_WRAPPER = "\r\n".join([
     "where py >nul 2>nul",
     'if not errorlevel 1 (set "SCI_PY=py" & set "SCI_PY_ARG=-3")',
     ":run",
-    '"%%SCI_PY%%" %%SCI_PY_ARG%% "%%~dp0sci.py" %%* & if errorlevel 130 (exit /b 130) else if errorlevel 2 '
-    '(exit /b 2) else if errorlevel 1 (exit /b 1) else if not errorlevel 0 (exit /b 1) else (exit /b 0)',
+    '"%%SCI_PY%%" %%SCI_PY_ARG%% "%%~dp0sci.py" %%* & if not exist "%%~dp0sci.py" (if errorlevel 1 '
+    '((goto) 2>nul & cmd /d /c exit 1) else ((goto) 2>nul & cmd /d /c exit 0)) else if errorlevel 130 '
+    '(exit /b 130) else if errorlevel 2 (exit /b 2) else if errorlevel 1 (exit /b 1) else if not errorlevel 0 '
+    '(exit /b 1) else (exit /b 0)',
     ""])
 
 
