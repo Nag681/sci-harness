@@ -1,0 +1,62 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [3.0.0] - 2026-10-26
+
+Rewritten for one job: keeping small models productive on long-horizon scientific and numerical
+coding in large codebases, across context compactions. Breaking: the 2.x scripts, `.agent/` state
+folder and generic DevSecOps/CI-CD material are gone.
+
+### Added
+- `scripts/sci.py`: a single standard-library tool that keeps all state in `<repo>/.sci/`
+  (git-excluded) and drives a plan → task → check → lock → verify → done loop, one commit per task.
+- Compaction recovery: `resume`, a `[sci] ... NEXT:` footer after every command, `now`, and
+  `.sci/HANDOFF.md` regenerated on every change.
+- Regression guards: locked acceptance tests; tests locked or created by a finished task stay
+  protected; edits to existing tests are scanned for loosened tolerances, removed assertions,
+  skips, changed numbers, duplicate test names and early returns; golden numerical outputs;
+  every earlier task's check re-runs on `verify`; `baseline` enrolls the test suite that `verify`
+  re-runs and records pre-existing failures; hand edits to task specs are detected.
+- Debugging discipline: strike counter, STOP after 3 failed fixes (hypotheses + logged experiments
+  required), ESCALATE after 6; refuted hypotheses shown as RULED OUT after compactions.
+- Safe undo: snapshots through a private git index (the user's staging area is untouched);
+  `restore` saves the current attempt as a patch first and restores locked files exactly.
+- Large-codebase helpers: `find`, `map`, typed notes, capped output with full logs in `.sci/runs/`,
+  timeouts that kill the whole process group, automatic rebuilds for compiled code (`build_cmd`).
+- Science helpers: `golden`, `order` (observed convergence order), `run` (experiments with the
+  repo on PYTHONPATH, cited by run number).
+- `lock --none` and automatic "nothing to lock" for tasks whose verify command names no test
+  file; files in a task's scope are never locked.
+- References: scientific verification templates, debugging protocol, large codebases, and a
+  recorded example session.
+- `scripts/sci_hook.py`: hooks for Claude Code, Codex, Gemini CLI and Antigravity that re-anchor
+  the agent each turn and after compaction and block destructive git commands. They do nothing
+  outside repositories with `.sci/`.
+- `install.py`: installs the skill for every detected agent (Claude Code, Codex, Gemini CLI,
+  Antigravity, OpenCode, pi, or any skills directory), with opt-in hooks, `--status` and
+  `--uninstall`.
+- Test suites: `tests/test_sci.py` and `tests/test_install.py`.
+
+### Changed
+- `SKILL.md` rewritten as short imperative rules, a table mapping tool messages to actions, and a
+  NEXT-driven loop.
+- State moved from `.agent/` (an Antigravity customization folder name) to `.sci/`. `sci.py init`
+  imports tasks from an old `.agent/feature_list.json`.
+
+### Removed
+- `scripts/event_logger.py`, `security_audit.py`, `security_audit.sh`, `test_runner.sh`,
+  `release_manager.sh`, `init_harness.sh`; `examples/`, `resources/`, `SESSION_LOG.md`,
+  `tests/test_all.py`.
+- References `cicd-and-supply-chain.md`, `security-and-cwe.md`, `event-logging-and-git.md`,
+  `testing-handbook.md`, `debugging-playbook.md`, `scientific-computing-and-vv.md` (the scientific
+  and debugging material lives on in the new references).
+
+## [2.x and earlier]
+
+Unpublished predecessors under the same name: a general software-engineering guide (ADRs, event
+logging, security audits, CI/CD). Nothing from them remains in 3.0.0 except the task import from
+`.agent/feature_list.json`.
