@@ -118,7 +118,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: cmd
         run: |
-          curl -fsSLo %TEMP%\sci-install.ps1 %RAW%/install.ps1 && powershell -NoProfile -ExecutionPolicy Bypass -File %TEMP%\sci-install.ps1 --only claude --status
+          curl -fsSLo %TEMP%\sci.ps1 %RAW%/install.ps1 && powershell -NoProfile -ExecutionPolicy Bypass -File %TEMP%\sci.ps1 --only claude --status
 
       - name: curl | sh in Git Bash
         if: runner.os == 'Windows'

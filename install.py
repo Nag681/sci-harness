@@ -572,6 +572,8 @@ def cmd_uninstall(args, prefix, home_dir):
 def describe(p, home_dir):
     if os.path.islink(str(p)):
         tgt = os.readlink(str(p))
+        if tgt.startswith("\\\\?\\"):
+            tgt = tgt[4:]  # Windows returns \\?\C:\...
         if not os.path.exists(str(p)):
             return "BROKEN link -> " + tgt
         return "link -> " + tilde(tgt) + ("" if is_ours(p, home_dir) else "  (not ours)")
