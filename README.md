@@ -1,7 +1,7 @@
 # sci-harness
 
 The `software-engineer` [Agent Skill](https://agentskills.io): a long-horizon harness that helps small,
-cheap models (Haiku, Gemini Flash, GPT-OSS and similar) do long scientific and numerical coding tasks
+inexpensive models (Haiku, Gemini Flash, GPT-OSS and similar) do long scientific and numerical coding tasks
 in large codebases without regressing. It is built for the ways small models fail on long tasks:
 
 | Failure | What the skill does |
