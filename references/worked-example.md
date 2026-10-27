@@ -161,7 +161,7 @@ FAIL check T1: exit 1 in 0.2s | log .sci/runs/0007-check-T1.log
 Attempt saved: .sci/attempts/T1-strike3-1793023174.patch
 !!! STOP: 3 failed fix attempts in a row. Do NOT edit code now.
 !!! 1) .sci/sci hyp add "<specific, testable cause>"  (at least 2 hypotheses)
-!!! 2) test each with a tiny experiment (print/probe/script in .sci/scratch), not a code fix
+!!! 2) test each with a tiny experiment, not a code fix: .sci/sci run "python3 .sci/scratch/probe.py"
 !!! 3) .sci/sci hyp refute H<n> "<evidence>"  or  .sci/sci hyp confirm H<n> "<evidence>"
 !!! Then fix only the confirmed cause. Undo bad edits with: .sci/sci restore
 [sci] T1 "Add velocity Verlet step" | check FAIL 0s ago | strikes 3/3 | NEXT: STOP (3 failed fixes on T1): do not edit code. `.sci/sci hyp add` >=2 causes, test each with a small experiment, then `.sci/sci hyp refute|confirm H<n> "<evidence>"`.
@@ -175,11 +175,11 @@ Each hypothesis names one line of code and predicts what a measurement will show
 $ .sci/sci hyp add "velocity update ignores a(t+dt): should be v + 0.5*dt*(a(t) + a(t+dt))"
 Added H1: velocity update ignores a(t+dt): should be v + 0.5*dt*(a(t) + a(t+dt))
 Test it with a small experiment (probe/print/script in .sci/scratch), then: .sci/sci hyp refute|confirm H1 "<evidence>"
-STOP still active: need 1 more hypothesis(es) and refute or confirm at least one.
+STOP still active: need 1 more hypothesis(es), an experiment (`.sci/sci run "<probe>"`) and refute or confirm at least one.
 
 $ .sci/sci hyp add "position update has the wrong dt^2 coefficient"
 Added H2: position update has the wrong dt^2 coefficient
-STOP still active: need refute or confirm at least one.
+STOP still active: need an experiment (`.sci/sci run "<probe>"`) and refute or confirm at least one.
 ```
 
 One step with dt = 0.1 from x = 1, v = 0 tests both. `.sci/scratch/probe.py` prints each value next
@@ -201,6 +201,7 @@ run 8: exit 0 in 0.0s | log .sci/runs/0008-run-T1.log
   | x1 0.995 expected 0.995
   | v1 -0.05 expected -0.09975 | using a(t) only: -0.05
 Cite it as evidence: .sci/sci hyp confirm|refute H<n> "run 8: <what it showed>"
+STOP still active: need refute or confirm at least one.
 
 $ .sci/sci hyp confirm H1 "run 8: v1 = -0.05 equals the a(t)-only value; Verlet needs -0.09975"
 H1 confirmed.

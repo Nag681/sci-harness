@@ -94,16 +94,48 @@ def briefing(root, st):
             "summarized; trust .sci). Run `.sci/sci resume` before acting.\n%s" % (root, anchor(st)))
 
 
+QUOTED_RE = re.compile(r'"((?:\\.|[^"\\])*)"|\'([^\']*)\'')
+SEP_RE = re.compile(r"&&|\|\||;|\||\n")
+CHECKOUT_BRANCH_OPTS = ("-b", "-B", "--orphan", "-t", "--track", "--detach", "-")
+
+
+def _unquote(seg):
+    """Quoted words stay (`rm -rf ".sci"`); quoted text with spaces (messages, notes) is blanked."""
+    return QUOTED_RE.sub(lambda m: '""' if re.search(r"\s", m.group(1) or m.group(2) or "")
+                         else (m.group(1) or m.group(2) or '""'), seg)
+
+
+def _checkout_files(s):
+    """git checkout <ref> <path>... overwrites files even without `--`; `git checkout <branch>` does not."""
+    words = s.split()
+    args = words[words.index("checkout") + 1:] if "checkout" in words else []
+    if any(a in CHECKOUT_BRANCH_OPTS for a in args):
+        return False
+    return len([a for a in args if not a.startswith("-") and a != '""' and not re.match(r"\d*[<>&]", a)]) >= 2
+
+
 def destructive_reason(cmd):
     if not isinstance(cmd, str):
         return None
-    for seg in re.split(r"&&|\|\||;|\||\n", cmd):
+    # Quoted text is checked only as a command of its own (bash -c "git stash"); a message or note that
+    # mentions a git command is not one.
+    for m in QUOTED_RE.finditer(cmd):
+        q = (m.group(1) if m.group(1) is not None else m.group(2)).replace('\\"', '"')
+        for part in SEP_RE.split(q):
+            if re.match(r"\s*(git|rm|rmdir|del|remove-item|\S*sci(\.py|\.cmd)?)\s", part, re.I):
+                r = destructive_reason(part)
+                if r:
+                    return r
+    for seg in SEP_RE.split(_unquote(cmd)):
         s = " " + " ".join(seg.split()) + " "
+        if re.search(r"(^|[\s/\\])sci(\.py|\.cmd)?\s+(purge\b|review\s.*--clear\b)", s):
+            return "sci purge / review --clear (human only)"
         has_git = re.search(r"(^|\s)git\s", s) is not None
         if has_git:
             if re.search(r"\sreset\s.*--hard\b", s):
                 return "git reset --hard"
-            if re.search(r"\scheckout\s", s) and re.search(r"\s--\s|\s\.\s|\s-f\s|--force|--ours|--theirs", s):
+            if re.search(r"\scheckout\s", s) and (re.search(r"\s--\s|\s\.\s|\s-f\s|--force|--ours|--theirs", s)
+                                                  or _checkout_files(s)):
                 return "git checkout of files"
             if re.search(r"\srestore\s", s) and ("--staged" not in s or "--worktree" in s or " -W " in s):
                 return "git restore"

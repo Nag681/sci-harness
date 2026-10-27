@@ -15,7 +15,7 @@ compatibility: >-
   OpenCode, pi, Cursor).
 allowed-tools: Bash Read Write Edit Glob Grep
 metadata:
-  version: "3.1.0"
+  version: "3.1.1"
 ---
 
 # Long-horizon scientific coding

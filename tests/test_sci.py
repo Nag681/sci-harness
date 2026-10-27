@@ -287,6 +287,26 @@ class TestPlanning(unittest.TestCase):
         self.assertIn("runs a whole test suite", out)
         self.assertIn("no --scope", out)
 
+    def test_scope_accepts_comma_separated_lists(self):
+        sb = Sandbox(self)
+        sb.init()
+        sb.ok("task", "add", "t", "--verify", "true", "--scope", "a.py, b.py", "--scope", "c")
+        self.assertEqual(sb.state()["tasks"][0]["scope"], ["a.py", "b.py", "c"])
+        sb.ok("task", "start")
+        sb.ok("task", "scope", "d.py,a.py")
+        self.assertEqual(sb.state()["tasks"][0]["scope"], ["a.py", "b.py", "c", "d.py"])
+
+    def test_human_only_refusals_do_not_hand_the_agent_the_command(self):
+        sb = Sandbox(self)
+        sb.init()
+        for args in (("purge",), ("review", "--clear")):
+            rc, out = sb.sci(*args)
+            self.assertEqual(rc, 2, out)
+            do = [ln for ln in out.splitlines() if ln.startswith("DO:")]
+            self.assertTrue(do, out)
+            self.assertNotIn("--yes", do[0])
+        self.assertTrue((sb.root / ".sci").is_dir())
+
     def test_one_active_task_and_dependencies(self):
         sb = Sandbox(self)
         sb.init()
@@ -372,7 +392,9 @@ class TestLoop(unittest.TestCase):
         out = sb.ok("hyp", "add", "k2 uses the wrong slope")
         self.assertIn("STOP still active", out)
         sb.ok("hyp", "add", "update is first order (no averaging)")
-        out = sb.ok("hyp", "confirm", "H2", "run 3 shows order 1.0 and the code has a single slope")
+        out = sb.ok("hyp", "confirm", "H2", "the code has a single slope")
+        self.assertIn("STOP still active: need an experiment", out)  # a verdict alone does not lift it
+        out = sb.ok("run", "%s -c \"print('order 1.0')\"" % PYQ)
         self.assertIn("STOP cleared", out)
         sb.ok("hyp", "refute", "H1", "there is no k2 at all")
         out = sb.ok("resume")
@@ -714,6 +736,14 @@ class TestGoldenAndBaseline(unittest.TestCase):
         self.assertEqual(sb.state()["review"][-1]["kind"], "tolerance-loosened")
         sb.ok("golden", "check")
 
+    def test_golden_warns_about_exact_zeros_with_atol_zero(self):
+        sb = Sandbox(self)
+        sb.init()
+        out = sb.ok("golden", "add", "z", "--cmd", "echo 'momentum 0.0 energy 1.5'")
+        self.assertIn("1 of the numbers are exactly 0", out)
+        out = sb.ok("golden", "add", "z2", "--cmd", "echo 'momentum 0.0 energy 1.5'", "--atol", "1e-14")
+        self.assertNotIn("exactly 0", out)
+
     def test_intended_golden_change_leads_back_to_verify(self):
         sb = Sandbox(self)
         sb.init()
@@ -872,6 +902,21 @@ class TestUnits(unittest.TestCase):
         self.assertTrue(any("trivial assertion" in i for i in issues("def test_a():\n    assert f() == 1\n",
                                                                      "def test_a():\n    assert True\n")))
         self.assertEqual(issues("x = 1\n", "x = 1\ny = 2\n"), [])
+        # an operator change at the same time, an inserted comment, or a looser tolerance elsewhere in the diff
+        self.assertTrue(any("number changed" in i for i in issues("    assert err < 1e-6\n", "    assert err <= 1e-1\n")))
+        self.assertTrue(any("number changed" in i for i in issues("    assert err < 1e-6\n",
+                                                                  "    # tightened\n    assert err < 1e-2\n")))
+        self.assertTrue(any("tolerance loosened: rtol 1e-12" in i for i in issues(
+            "    assert isclose(a, b, rtol=1e-12)\n    assert isclose(c, d, rtol=1e-2)\n",
+            "    assert isclose(a, b, rtol=1e-4)\n    assert isclose(c, d, rtol=1e-3)\n")))
+        base = "def test_a():\n    assert f() == 1\n"
+        swallowed = "def test_a():\n    try:\n        assert f() == 1\n    except AssertionError:\n        pass\n"
+        self.assertTrue(any("catches assertion failures" in i for i in issues(base, swallowed)))
+        dead = "def test_a():\n    if False:\n        assert f() == 1\n"
+        self.assertTrue(any("never runs" in i for i in issues(base, dead)))
+        must_fail = ("def test_a():\n    try:\n        assert f() == 1\n    except AssertionError:\n        pass\n"
+                     "    else:\n        raise RuntimeError('should fail')\n")
+        self.assertEqual(issues(base, must_fail), [])
 
     def test_parse_numbers(self):
         got = sci.parse_numbers(["version v1.2.3 info: energy -1.5e-3 nan inf 2.0D+01 x2 step10 0.5"])
@@ -881,6 +926,8 @@ class TestUnits(unittest.TestCase):
         self.assertEqual(got[2], float("inf"))
         self.assertEqual(got[3], 20.0)
         self.assertEqual(got[4], 0.5)
+        # a number glued to a unit or inside a version is skipped, not cut to its integer part
+        self.assertEqual(sci.parse_numbers(["t=12.5s 3.14rad 1.2.3 E=1.5. x 2."]), [1.5, 2.0])
 
     def test_compare_numbers(self):
         self.assertTrue(sci.compare_numbers([1.0, float("nan")], [1.0 + 1e-13, float("nan")], 1e-12, 0)[0])
@@ -892,6 +939,11 @@ class TestUnits(unittest.TestCase):
         self.assertEqual(rc, 0)
         rc = sci.main(["order", "--h", "0.1", "0.05", "--err", "1e-2", "5e-3", "--expect", "2"])
         self.assertEqual(rc, 1)
+        # finest first: the finest pair (order 0.32 here) decides, not the coarsest (order 2)
+        rc = sci.main(["order", "--h", "0.025", "0.05", "0.1", "--err", "2e-3", "2.5e-3", "1e-2", "--expect", "2"])
+        self.assertEqual(rc, 1)
+        rc = sci.main(["order", "--h", "0.025", "0.05", "0.1", "--err", "6.25e-4", "2.5e-3", "1e-2", "--expect", "2"])
+        self.assertEqual(rc, 0)
 
     def test_glob_matching(self):
         self.assertTrue(sci.match_any("src/heat/solver.py", ["src/heat"]))
@@ -1044,10 +1096,14 @@ class TestHooks(unittest.TestCase):
         bad = ["git reset --hard HEAD~1", "git checkout -- src/a.py", "git checkout .", "git restore src/a.py",
                "git clean -fdx", "git stash", "git stash push -m x", "git push --force", "git branch -D topic",
                "cd repo && git checkout HEAD -- .", "rm -rf .sci", "git -C x reset --hard", "git switch -f main",
-               "git restore --staged --worktree a.py"]
+               "git restore --staged --worktree a.py", "git checkout HEAD file.py", "git checkout HEAD~1 src/",
+               'bash -c "git stash"', "sh -c 'cd x; git clean -fdx'", ".sci/sci purge --yes",
+               ".sci/sci review --clear --yes", 'rm -rf ".sci"']
         good = ["git status", "git checkout -b topic", "git checkout main", "git restore --staged a.py",
                 "git stash list", "git diff", "rm -rf build/.scikit", "git log --oneline", "git push origin topic",
-                "pytest -q", "git commit -m 'fix: x'"]
+                "pytest -q", "git commit -m 'fix: x'", '.sci/sci note "never run git stash or git restore" --kind gotcha',
+                'git commit -m "avoid git clean -fd; it deletes data"', "git checkout main 2>/dev/null",
+                ".sci/sci review", '.sci/sci done -m "fix: git reset --hard handling"']
         for c in bad:
             self.assertIsNotNone(sci_hook.destructive_reason(c), c)
         for c in good:

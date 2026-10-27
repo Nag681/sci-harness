@@ -34,7 +34,7 @@ import sys
 import time
 from pathlib import Path
 
-VERSION = "3.1.0"
+VERSION = "3.1.1"
 SD = ".sci"
 SCHEMA = 1
 WINDOWS = os.name == "nt"
@@ -47,7 +47,8 @@ DEFAULT_CONFIG = {
     "build_globs": [
         "**/*.c", "**/*.h", "**/*.cc", "**/*.cpp", "**/*.cxx", "**/*.hpp", "**/*.cu",
         "**/*.f", "**/*.for", "**/*.f90", "**/*.F90", "**/*.f95", "**/*.F",
-        "**/*.pyx", "**/*.pxd", "**/CMakeLists.txt", "**/meson.build", "setup.py",
+        "**/*.pyx", "**/*.pxd", "**/*.rs", "**/CMakeLists.txt", "**/*.cmake", "**/meson.build", "setup.py",
+        "setup.cfg", "pyproject.toml", "**/Cargo.toml",
     ],
     "test_globs": [
         "tests/**", "test/**", "testing/**", "**/tests/**", "**/test/**", "**/testing/**",
@@ -896,6 +897,56 @@ def _strip_tols(ln):
     return " ".join(TOL_RE.sub(lambda m: m.group(1).lower() + "=#", ln).split())
 
 
+CMP_RE = re.compile(r"<=|>=|==|!=|<|>")
+
+
+def _skeleton(ln):
+    """The line with numbers and comparison operators blanked: `err < 1e-6` and `err <= 1e-1` look the same."""
+    return " ".join(CMP_RE.sub("<op>", NUM_RE.sub("#", ln)).split())
+
+
+def pair_lines(rem, add):
+    """Pair each removed line with the most similar added line of the same hunk (not by position, so an inserted
+    comment does not shift the pairs)."""
+    if len(rem) * len(add) > 2500:
+        return list(zip(rem, add))
+    cands = sorted(((difflib.SequenceMatcher(None, a, b).ratio(), i, j) for i, a in enumerate(rem)
+                    for j, b in enumerate(add)), reverse=True)
+    used_r, used_a, pairs = set(), set(), []
+    for ratio, i, j in cands:
+        if ratio < 0.6:
+            break
+        if i not in used_r and j not in used_a:
+            used_r.add(i)
+            used_a.add(j)
+            pairs.append((i, rem[i], add[j]))
+    return [(a, b) for _, a, b in sorted(pairs)]
+
+
+def _looser(k, o, n):
+    return min(n) < min(o) if k in DIGIT_TOLS else max(n) > max(o)
+
+
+def _swallows_failures(node):
+    """A try statement whose handler catches assertion failures without re-raising."""
+    if not isinstance(node, ast.Try) or not any(isinstance(x, ast.Assert) or (
+            isinstance(x, ast.Call) and isinstance(x.func, ast.Attribute) and x.func.attr.startswith("assert"))
+            for b in node.body for x in ast.walk(b)):
+        return False
+    def fails(body):  # raise, self.fail(...) or pytest.fail(...)
+        return any(isinstance(x, ast.Raise) or (isinstance(x, ast.Call) and getattr(x.func, "attr",
+                   getattr(x.func, "id", "")) == "fail") for b in body for x in ast.walk(b))
+    if fails(node.orelse):
+        return False  # "this must fail" pattern
+    for h in node.handlers:
+        names = [h.type] if not isinstance(h.type, ast.Tuple) else list(h.type.elts)
+        catches = h.type is None or any(getattr(x, "id", getattr(x, "attr", "")) in
+                                        ("AssertionError", "Exception", "BaseException") for x in names)
+        if catches and not fails(h.body):
+            return True
+    return False
+
+
 def py_test_issues(text):
     try:
         tree = ast.parse(text)
@@ -915,6 +966,11 @@ def py_test_issues(text):
                     if isinstance(stmt, ast.Return):
                         issues.add("early `return` in %s turns the rest of the test into dead code" % node.name)
                         break
+                for sub in ast.walk(node):
+                    if isinstance(sub, ast.If) and isinstance(sub.test, ast.Constant) and not sub.test.value:
+                        issues.add("`if %r:` block in %s never runs" % (sub.test.value, node.name))
+                    elif _swallows_failures(sub):
+                        issues.add("try/except in %s catches assertion failures without re-raising" % node.name)
             elif isinstance(node, ast.ClassDef):
                 scan(node.body, "class " + node.name)
 
@@ -941,14 +997,18 @@ def weakening_issues(path, hunks, old_text=None, new_text=None, strict=False):
     old_t, new_t = tol_values(rem), tol_values(add)
     for k in sorted(set(old_t) & set(new_t)):
         o, n = old_t[k], new_t[k]
-        looser = min(n) < min(o) if k in DIGIT_TOLS else max(n) > max(o)
-        if looser:
+        if _looser(k, o, n):
             issues.append("tolerance loosened: %s %g -> %g" % (k, max(o), max(n)))
     for h in hunks:
-        for a, b in zip(h["rem"], h["add"]):
+        for a, b in pair_lines(h["rem"], h["add"]):
+            # line by line too: a looser tolerance elsewhere in the file must not hide this one
+            old_t, new_t = tol_values([a]), tol_values([b])
+            for k in sorted(set(old_t) & set(new_t)):
+                if _looser(k, old_t[k], new_t[k]):
+                    issues.append("tolerance loosened: %s %g -> %g" % (k, max(old_t[k]), max(new_t[k])))
             if not (ASSERT_RE.search(a) or ASSERT_RE.search(b) or TOL_RE.search(a)):
                 continue
-            if " ".join(NUM_RE.sub("#", a).split()) != " ".join(NUM_RE.sub("#", b).split()):
+            if _skeleton(a) != _skeleton(b):
                 continue
             if NUM_RE.findall(a) == NUM_RE.findall(b):
                 continue
@@ -1074,7 +1134,7 @@ def compute_next(st, cfg, live_tree=None):
                         "approach (.sci/sci note --kind decision), or `.sci/sci task block %s --reason \"<question>\"` and ask "
                         "the human." % (t["id"], t["id"]))
             return ("STOP (3 failed fixes on %s): do not edit code. `.sci/sci hyp add` >=2 causes, test each with a "
-                    "small experiment, then `.sci/sci hyp refute|confirm H<n> \"<evidence>\"`." % t["id"])
+                    "small `.sci/sci run` experiment, then `.sci/sci hyp refute|confirm H<n> \"<evidence>\"`." % t["id"])
         if st.get("violations"):
             return "Guard violation: %s. %s" % (trunc(fmt_viol(st["violations"][0]), 140), guard_fix_hint(st["violations"]))
         lc = t.get("last_check")
@@ -1227,7 +1287,7 @@ def render_handoff(st, cfg):
 # --------------------------------------------------------------------------- golden numbers
 
 GOLD_NUM_RE = re.compile(r"(?<![A-Za-z0-9_.])[-+]?(?:(?:\d+\.\d*|\.\d+|\d+)(?:[eEdD][-+]?\d+)?|"
-                         r"(?:nan|inf(?:inity)?)\b)(?![A-Za-z0-9_])", re.I)
+                         r"(?:nan|inf(?:inity)?)\b)(?![A-Za-z0-9_]|\.\d)", re.I)
 
 
 def parse_numbers(lines, filt=None):
@@ -1544,7 +1604,7 @@ def vendor_self(repo):
         changed = True
     os.chmod(str(w), 0o755)
     wc = repo.dir / "sci.cmd"
-    launcher = SCI_CMD_WRAPPER % sys.executable
+    launcher = SCI_CMD_WRAPPER % sys.executable.replace("%", "%%")
     if read_text(wc) != launcher:
         atomic_write(wc, launcher)
     return changed
@@ -1780,7 +1840,7 @@ def cmd_task_add(args):
     with state_lock(store.repo):
         tid = "T%d" % st["next_task"]
         st["next_task"] += 1
-        t = {"id": tid, "title": title.strip(), "verify": args.verify.strip(), "scope": [s.strip() for s in args.scope or []],
+        t = {"id": tid, "title": title.strip(), "verify": args.verify.strip(), "scope": split_scope(args.scope),
              "invariants": [s.strip() for s in args.inv or []], "deps": deps, "status": "todo",
              "why": (args.why or "").strip(), "created": now_iso()}
         t["spec_hash"] = spec_hash(t)
@@ -1966,8 +2026,8 @@ def cmd_task_amend(args):
                     t["invariants"].remove(i)
                     changes.append("invariant dropped: " + i)
         if args.scope:
-            t["scope"] += [s for s in args.scope if s not in t["scope"]]
-            changes.append("scope += " + ", ".join(args.scope))
+            t["scope"] += [s for s in split_scope(args.scope) if s not in t["scope"]]
+            changes.append("scope += " + ", ".join(split_scope(args.scope)))
         if args.dep:
             for d in args.dep:
                 did = need_task(st, d)["id"]
@@ -1989,12 +2049,20 @@ def cmd_task_amend(args):
     return 0
 
 
+def split_scope(items):
+    """Scope globs from repeated or comma-separated arguments (`--scope a.py,b.py` is two entries)."""
+    out = []
+    for s in items or []:
+        out += [x.strip() for x in s.split(",") if x.strip() and x.strip() not in out]
+    return out
+
+
 def cmd_task_scope(args):
     store = load_store()
     st = store.st
     t = require_active(st)
     with state_lock(store.repo):
-        added = [s for s in args.globs if s not in t["scope"]]
+        added = [s for s in split_scope(args.globs) if s not in t["scope"]]
         t["scope"] += added
         store.log("TASK_SCOPE", task=t["id"], msg=", ".join(added))
         if added and t.get("last_check"):
@@ -2212,7 +2280,7 @@ def record_attempt(store, t, ok, tree, run):
         if p:
             msgs.append("Attempt saved: %s" % repo.rel(p))
         if t["strikes"] >= 3 and not t.get("stop"):
-            t["stop"] = {"since_hyp": st["next_hyp"], "t": now_iso()}
+            t["stop"] = {"since_hyp": st["next_hyp"], "runs": 0, "t": now_iso()}
             store.log("STOP", task=t["id"], msg="%d failed attempts" % t["strikes"])
     t["last_check"] = {"ok": ok, "tree": tree, "t": now_iso(), "run": run.n if run else None,
                        "failing": (run.failing[:20] if run else [])}
@@ -2221,7 +2289,7 @@ def record_attempt(store, t, ok, tree, run):
 
 STOP_BANNER = ("!!! STOP: 3 failed fix attempts in a row. Do NOT edit code now.\n"
                "!!! 1) .sci/sci hyp add \"<specific, testable cause>\"  (at least 2 hypotheses)\n"
-               "!!! 2) test each with a tiny experiment (print/probe/script in .sci/scratch), not a code fix\n"
+               "!!! 2) test each with a tiny experiment, not a code fix: .sci/sci run \"python3 .sci/scratch/probe.py\"\n"
                "!!! 3) .sci/sci hyp refute H<n> \"<evidence>\"  or  .sci/sci hyp confirm H<n> \"<evidence>\"\n"
                "!!! Then fix only the confirmed cause. Undo bad edits with: .sci/sci restore")
 
@@ -2600,6 +2668,10 @@ def cmd_run(args):
         with state_lock(repo):
             r = run_cmd(store, cmd, "run", t["id"] if t else None, int(args.timeout or cfg["check_timeout"]))
             store.log("RUN", task=t["id"] if t else None, msg=cmd, run=r.n, rc=r.rc)
+            msg = None
+            if t and t.get("stop"):
+                t["stop"]["runs"] = int(t["stop"].get("runs") or 0) + 1
+                msg = maybe_clear_stop(store, t)
             store.save()
     finally:
         if old is None:
@@ -2617,6 +2689,8 @@ def cmd_run(args):
     for ln in body[-n:]:
         print("  | " + trunc(ln, 240))
     print("Cite it as evidence: .sci/sci hyp confirm|refute H<n> \"run %d: <what it showed>\"" % r.n)
+    if msg:
+        print(msg)
     return 0 if r.ok else 1
 
 
@@ -2627,20 +2701,23 @@ def maybe_clear_stop(store, t):
     since = t["stop"].get("since_hyp", 0)
     mine = [h for h in st["hyps"] if h.get("task") == t["id"] and int(h["id"][1:]) >= since]
     resolved = [h for h in mine if h["status"] != "open"]
-    if len(mine) >= 2 and resolved:
+    ran = int(t["stop"].get("runs") or 0) > 0  # evidence must come from an experiment, not just a written verdict
+    if len(mine) >= 2 and resolved and ran:
         t["stop"] = None
         t["strikes"] = 0
         t["stop_cycles"] = int(t.get("stop_cycles") or 0) + 1
-        store.log("STOP_CLEARED", task=t["id"], msg="hypotheses recorded")
+        store.log("STOP_CLEARED", task=t["id"], msg="hypotheses tested")
         return ("STOP cleared: strikes reset. Fix only what the evidence supports%s." %
                 (" (confirmed: %s)" % ", ".join(h["id"] for h in resolved if h["status"] == "confirmed")
                  if any(h["status"] == "confirmed" for h in resolved) else ""))
     need = []
     if len(mine) < 2:
         need.append("%d more hypothesis(es)" % (2 - len(mine)))
+    if not ran:
+        need.append("an experiment (`.sci/sci run \"<probe>\"`)")
     if not resolved:
         need.append("refute or confirm at least one")
-    return "STOP still active: need " + " and ".join(need) + "."
+    return "STOP still active: need " + ", ".join(need[:-1]) + (" and " if len(need) > 1 else "") + need[-1] + "."
 
 
 def cmd_hyp(args):
@@ -2839,6 +2916,10 @@ def cmd_golden(args):
             store.save()
             print("Golden %s %s: %d numbers, rtol=%g atol=%g (reproducible across 2 runs)." % (
                 name, "recorded" if a == "add" else "re-recorded", len(vals), rtol, atol))
+            zeros = sum(1 for v in vals if v == 0.0)
+            if zeros and atol == 0.0:
+                print("  note: %d of the numbers are exactly 0, and with atol=0 any round-off there (1e-17) fails. If "
+                      "round-off is expected, record again with an --atol on the scale of the other numbers." % zeros)
             if dirty and a == "add":
                 print("  note: recorded with uncommitted changes in the tree. Goldens should capture known-good "
                       "behavior (usually recorded before you change numerical code).")
@@ -2886,16 +2967,18 @@ def cmd_order(args):
     hs = args.h or ([1.0 / n for n in args.n] if args.n else None)
     if not hs or not args.err or len(hs) != len(args.err) or len(hs) < 2:
         refuse("Need matching lists with >= 2 entries.", ".sci/sci order --h 0.1 0.05 0.025 --err 1e-2 2.6e-3 6.4e-4 --expect 2")
+    pairs = sorted(zip(hs, args.err), key=lambda he: -he[0])  # coarse to fine, whatever order they were given in
+    hs, errs = [h for h, _ in pairs], [e for _, e in pairs]
     rows, ps = [], []
     for i in range(len(hs) - 1):
-        h1, h2, e1, e2 = hs[i], hs[i + 1], args.err[i], args.err[i + 1]
+        h1, h2, e1, e2 = hs[i], hs[i + 1], errs[i], errs[i + 1]
         if min(h1, h2, e1, e2) <= 0 or h1 == h2:
             refuse("Resolutions must differ and errors must be > 0.")
         p = math.log(e1 / e2) / math.log(h1 / h2)
         ps.append(p)
         rows.append("  h %.4g -> %.4g | err %.4g -> %.4g | observed order p = %.3f" % (h1, h2, e1, e2, p))
     out(rows)
-    mono = all(args.err[i + 1] < args.err[i] for i in range(len(args.err) - 1)) if hs[0] > hs[-1] else True
+    mono = all(errs[i + 1] < errs[i] for i in range(len(errs) - 1))
     if not mono:
         print("WARNING: error does not decrease monotonically with refinement (pre-asymptotic, round-off floor, or bug).")
     if args.expect is not None:
@@ -3091,8 +3174,8 @@ def cmd_review(args):
     st = store.st
     if args.clear:
         if not args.yes:
-            refuse("HUMAN ONLY: clearing review items hides them from the human.",
-                   "A human may run: .sci/sci review --clear --yes")
+            refuse("HUMAN ONLY: clearing review items hides them from the human (a human adds --yes).",
+                   "Do not clear them. Leave them for the human to read in `.sci/sci report`.")
         with state_lock(store.repo):
             n = len(st["review"])
             st["review"] = []
@@ -3164,8 +3247,8 @@ def cmd_pause(args, value=True):
 def cmd_purge(args):
     repo = Repo(find_root())
     if not args.yes:
-        refuse("HUMAN ONLY: purge deletes .sci/ and all sci refs and backups in this repo.",
-               "A human may run: .sci/sci purge --yes")
+        refuse("HUMAN ONLY: purge deletes .sci/ and all sci refs and backups in this repo (a human adds --yes).",
+               "Do not purge. If the human asked for it, ask them to run it themselves.")
     drop_refs(repo, "")
     shutil.rmtree(str(repo.backup_dir), ignore_errors=True)
     shutil.rmtree(str(repo.dir), ignore_errors=True)

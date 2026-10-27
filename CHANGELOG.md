@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.1] - 2026-10-27
+
+### Fixed
+- STOP lifted after two hypotheses and one written verdict, even if no experiment was run. It now also needs at
+  least one `.sci/sci run` since the STOP, and a run can lift it once the hypotheses are in place.
+- The test-weakening guard missed `assert err < 1e-6` becoming `assert err <= 1e-1`, a number change after an
+  inserted comment (lines were paired by position), and a loosened tolerance when another changed line in the
+  file had a looser one. Lines are now paired by similarity and tolerances are also compared line by line. It
+  also flags new `if False:` blocks and `try/except` that swallows assertion failures in Python tests.
+- Golden outputs read `12.5s` as 12 and `1.2.3` as 1.2. A number glued to a unit or inside a version string is
+  now skipped. `golden add` notes exact zeros when `atol` is 0, since any round-off there fails.
+- `sci order` with resolutions given finest first judged the coarsest pair and skipped the monotonicity
+  warning. Resolutions are now sorted coarse to fine.
+- `purge` and `review --clear` refusals printed the `--yes` command on the `DO:` line, which agents are told
+  to run. The `DO:` line now tells the agent to leave it to the human.
+- Hooks: a note or commit message mentioning `git stash`, `git restore` or `git clean -fd` was blocked, while
+  `bash -c "git stash"` and `git checkout HEAD <file>` were not. Quoted text is now checked only when it is a
+  command of its own, `git checkout <ref> <path>` is blocked, and so are `sci purge` and `sci review --clear`.
+- `--scope a.py,b.py` is two entries, like `--dep`. Changes to `pyproject.toml`, `setup.cfg`, `*.cmake`,
+  `Cargo.toml` and `*.rs` trigger the configured rebuild. A `%` in the Python path no longer breaks the Windows
+  launcher.
+
 ## [3.1.0] - 2026-10-26
 
 ### Changed

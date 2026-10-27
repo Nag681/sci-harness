@@ -125,7 +125,7 @@ FAIL check T1: exit 1 in 0.1s | log .sci/runs/0007-check-T1.log
 Attempt saved: .sci/attempts/T1-strike3-1793033586.patch
 !!! STOP: 3 failed fix attempts in a row. Do NOT edit code now.
 !!! 1) .sci/sci hyp add "<specific, testable cause>"  (at least 2 hypotheses)
-!!! 2) test each with a tiny experiment (print/probe/script in .sci/scratch), not a code fix
+!!! 2) test each with a tiny experiment, not a code fix: .sci/sci run "python3 .sci/scratch/probe.py"
 !!! 3) .sci/sci hyp refute H<n> "<evidence>"  or  .sci/sci hyp confirm H<n> "<evidence>"
 !!! Then fix only the confirmed cause. Undo bad edits with: .sci/sci restore
 ```
@@ -316,7 +316,7 @@ flowchart TD
 | 🧪 **Test first** | For a new feature, the first `check` must FAIL. For a clean-up that shouldn't change behavior, it must PASS. |
 | 🔒 **Lock** | `lock` saves a fingerprint and a copy of the test files. Any change to them makes every check FAIL, even when the tests pass. Only `unlock` with a written reason frees them, and that goes on your review list. |
 | ❌ **Strikes** | A strike is a failed check after a code change, once the test is locked. Failures before the lock, or reruns without changes, don't count. A PASS resets the count. Each strike saves the attempt as a patch in `.sci/attempts/`. |
-| 🛑 **STOP** | At 3 strikes in a row, the agent must stop editing code. The STOP lifts once the agent has written 2 new guesses (*hypotheses*) and tested at least one, or when a check passes. |
+| 🛑 **STOP** | At 3 strikes in a row, the agent must stop editing code. The STOP lifts once the agent has written 2 new guesses (*hypotheses*), run at least one experiment through sci and used it to rule a guess in or out, or when a check passes. |
 | 🚨 **ESCALATE** | If the agent hits 3 strikes again after a STOP (6 failed fixes), it starts the task over a different way or asks you. Every guess it ruled out stays listed, so it never retries a dead end. |
 | 🛡️ **Guard** | Every check and verify confirms four things. The locked test is untouched. Finished tasks' tests are untouched. No test was weakened: no new skip, no deleted assert, no `assert True`, no looser tolerance, no changed expected number. And nobody edited the plan by hand. Breaking any of these counts as a FAIL. |
 | ✅ **Verify** | Runs these in order and stops at the first failure: the guard, then the build (for compiled code), this task's test, every finished task's test, the saved numbers (compared to about 12 digits) and finally the whole test suite (only new failures count). `verify --quick` runs only the first three. |
