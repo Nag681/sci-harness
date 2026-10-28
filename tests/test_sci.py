@@ -6,10 +6,12 @@ through its command line, exactly as an agent would.
 """
 import ast
 import base64
+import contextlib
 import json
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -804,6 +806,294 @@ class TestGoldenAndBaseline(unittest.TestCase):
         self.assertIn("NEW FAILURES", out)
 
 
+class TestReuse(unittest.TestCase):
+    def _rk2_checked(self, sb):
+        """T1 (rk2) started, locked and passing its check."""
+        sb.init()
+        sb.add_rk2_task()
+        sb.ok("task", "start")
+        sb.write_rk2_test()
+        sb.sci("check")
+        sb.ok("lock")
+        sb.write_rk2()
+        sb.ok("check")
+
+    def test_verify_reuses_passes_on_identical_code(self):
+        sb = Sandbox(self)
+        self._rk2_checked(sb)
+        out = sb.ok("verify")
+        self.assertIn("PASS task T1: reused (passed on identical code", out)
+        out = sb.ok("verify", "--fresh")
+        self.assertNotIn("reused", out)
+        self.assertIn("PASS task T1: exit 0", out)
+        sb.write("pkg/core.py", sb.read("pkg/core.py") + "\n# edited\n")
+        self.assertNotIn("reused", sb.ok("verify"))
+
+    def test_suite_runs_earlier_tasks_tests_once_and_blames_the_task(self):
+        sb = Sandbox(self)
+        sb.finish_rk2()
+        self.assertIn("reruns this suite", sb.ok("baseline"))
+        sb.ok("task", "add", "refactor", "--verify", "%s tests.test_core -q" % UT, "--scope", "pkg/core.py")
+        sb.ok("task", "start")
+        out = sb.ok("verify")
+        self.assertIn("note: the regression suite runs the tests of T1, so their checks do not run separately.", out)
+        self.assertNotIn("regression T1", out)
+        sb.write("pkg/core.py", sb.read("pkg/core.py").replace("0.5 * dt * (k1 + k2)", "dt * k1"))
+        rc, out = sb.sci("verify")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("REGRESSION: your change broke T1's tests (test_rk2.TestRK2.test_order)", out)
+
+    def test_done_accepts_doc_edits_after_verify_unless_a_test_reads_the_doc(self):
+        sb = Sandbox(self)
+        sb.write("README.md", "# demo\n")
+        sb.write("NOTES.md", "numbers\n")
+        sb.write("tests/test_notes.py", '"""Checks the claims of README.md."""\nimport unittest\n\n\n'
+                 'class TestNotes(unittest.TestCase):\n    def test_notes(self):\n'
+                 '        with open("NOTES.md") as f:\n            self.assertIn("numbers", f.read())\n')
+        sb.git("add", "-A")
+        sb.git("commit", "-q", "-m", "docs")
+        self._rk2_checked(sb)
+        sb.ok("verify")
+        sb.write("NOTES.md", "numbers and more\n")
+        rc, out = sb.sci("done", "-m", "feat: rk2")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("not verified on the current files", out)
+        sb.write("NOTES.md", "numbers\n")
+        sb.write("README.md", "# demo\n\nNow with rk2.\n")
+        out = sb.ok("done", "-m", "feat: rk2")
+        self.assertIn("Only documentation changed since verify (README.md)", out)
+        self.assertIn("README.md", sb.git("show", "--name-only", "--format=", "HEAD").split())
+
+    def test_a_docs_task_reuses_the_suite(self):
+        sb = Sandbox(self)
+        sb.init()
+        sb.ok("baseline")
+        sb.add_rk2_task()
+        sb.ok("task", "start")
+        sb.write_rk2_test()
+        sb.sci("check")
+        sb.ok("lock")
+        sb.write_rk2()
+        sb.ok("check")
+        self.assertIn("PASS regression suite: exit 0", sb.ok("verify"))
+        sb.ok("done", "-m", "feat: rk2")
+        sb.ok("task", "add", "document rk2", "--verify", "grep -q rk2 NOTES.md", "--scope", "NOTES.md")
+        sb.ok("task", "start")
+        sb.write("NOTES.md", "rk2 is second order in dt\n")
+        sb.ok("check")
+        sb.ok("lock")
+        out = sb.ok("verify")
+        self.assertIn("PASS task T2: reused", out)
+        self.assertIn("PASS regression suite: reused", out)  # the suite cannot read NOTES.md; its check can
+        sb.ok("done", "-m", "docs: rk2")
+
+    def test_ignored_tracked_files_do_not_change_snapshots_or_scope(self):
+        sb = Sandbox(self)
+        sb.write("graphify-out/GRAPH_REPORT.md", "v1\n")
+        sb.git("add", "-A")
+        sb.git("commit", "-q", "-m", "graph")
+        sb.init()
+        sb.ok("task", "add", "tune", "--verify", "%s tests.test_core -q" % UT, "--scope", "pkg/core.py")
+        sb.ok("task", "start")
+        sb.ok("check")
+        tree = sb.state()["tasks"][0]["last_check"]["tree"]
+        sb.write("graphify-out/GRAPH_REPORT.md", "v2, regenerated\n")
+        out = sb.ok("check")
+        self.assertEqual(sb.state()["tasks"][0]["last_check"]["tree"], tree)
+        self.assertNotIn("OUT OF SCOPE", out)
+        sb.ok("lock")
+        sb.ok("verify")
+        self.assertIn("files: (no changes)", sb.ok("done", "-m", "chore: nothing to change"))
+        self.assertIn("graphify-out/GRAPH_REPORT.md", sb.git("status", "--porcelain"))
+
+    def test_hyp_verdicts_check_the_id(self):
+        sb = Sandbox(self)
+        sb.init()
+        sb.ok("task", "add", "a", "--verify", "true", "--scope", "x")
+        sb.ok("task", "add", "b", "--verify", "true", "--scope", "y")
+        sb.ok("task", "start", "T1")
+        sb.ok("hyp", "add", "cause A")
+        sb.ok("hyp", "confirm", "H1", "probe shows A")
+        rc, out = sb.sci("hyp", "refute", "H1", "evidence meant for H2")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("H1 is already confirmed (evidence: probe shows A)", out)
+        sb.ok("hyp", "refute", "H1", "a second probe contradicts A", "--revise")
+        h = sb.state()["hyps"][0]
+        self.assertEqual((h["status"], h["history"][0]["evidence"]), ("refuted", "probe shows A"))
+        sb.ok("task", "block", "T1", "--reason", "need data")
+        sb.ok("task", "start", "T2")
+        rc, out = sb.sci("hyp", "confirm", "H1", "x")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("H1 belongs to T1, not to the active task T2", out)
+
+    def test_config_add_and_remove_list_items(self):
+        sb = Sandbox(self)
+        sb.init()
+        before = sb.read(".sci/config.json")
+        sb.ok("config", "add", "ignore_globs", "data/**")
+        globs = json.loads(sb.read(".sci/config.json"))["ignore_globs"]
+        self.assertEqual(globs[:-1], json.loads(before)["ignore_globs"])
+        self.assertEqual(globs[-1], "data/**")
+        sb.ok("config", "remove", "ignore_globs", "data/**")
+        self.assertNotIn("data/**", json.loads(sb.read(".sci/config.json"))["ignore_globs"])
+        rc, out = sb.sci("config", "add", "check_timeout", "5")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("check_timeout is not a list setting", out)
+
+    def test_run_numbers_never_repeat(self):
+        sb = Sandbox(self)
+        sb.init()
+        logs = lambda: sorted(p.name for p in (sb.root / ".sci" / "runs").glob("*.log"))  # noqa: E731
+        sb.ok("run", "echo one")
+        first = logs()
+        st = sb.state()
+        st["runs"] = 0  # as saved by a command that loaded the state before the run
+        (sb.root / ".sci" / "state.json").write_text(json.dumps(st))
+        sb.ok("run", "echo two")
+        self.assertEqual(len(logs()), len(first) + 1)
+
+
+SLOW_CHECK = '''\
+import os, sys, time
+gate, t0 = sys.argv[1], time.time()
+while not os.path.exists(gate) and time.time() - t0 < 90:
+    time.sleep(0.1)
+sys.exit(0 if os.path.exists(gate) else 1)
+'''
+
+
+def kill_job(job):
+    for pid in (job.get("pid"), job.get("child")):
+        if not pid:
+            continue
+        if WINDOWS:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+        else:
+            with contextlib.suppress(OSError):
+                os.killpg(int(pid), signal.SIGKILL)
+
+
+class TestBackground(unittest.TestCase):
+    def _slow_task(self, sb):
+        """T1 whose check runs until the returned gate file exists."""
+        gate = Path(tempfile.mkdtemp(prefix="sci-gate-"))
+        self.addCleanup(shutil.rmtree, str(gate), True)
+        sb.write("slow_check.py", SLOW_CHECK)
+        sb.git("add", "-A")
+        sb.git("commit", "-q", "-m", "slow check")
+        sb.init()
+        sb.ok("task", "add", "slow", "--verify", "%s slow_check.py %s" % (PYQ, shq(gate / "go")),
+              "--scope", "pkg/core.py")
+        sb.ok("task", "start")
+        return gate / "go"
+
+    def _job(self, sb, want=("pid", "child")):
+        """The newest job record, once its worker has recorded `want`."""
+        jobs = sb.root / ".sci" / "jobs"
+        n = max(int(p.stem) for p in jobs.glob("*.json") if p.stem.isdigit())
+        deadline, j = time.time() + 60, {}
+        while time.time() < deadline:
+            with contextlib.suppress(OSError, ValueError):
+                j = json.loads((jobs / ("%d.json" % n)).read_text())
+                if all(j.get(k) for k in want):
+                    return j
+            time.sleep(0.2)
+        raise AssertionError("job %d never recorded %s: %s" % (n, want, j))
+
+    def test_long_check_runs_in_background_and_wait_collects_it(self):
+        sb = Sandbox(self)
+        go = self._slow_task(sb)
+        rc, out = sb.sci("check", "--wait", "1")
+        self.assertEqual(rc, sci.JOB_RUNNING, out)
+        self.assertIn("STILL RUNNING in the background", out)
+        self.assertIn("NEXT: `.sci/sci wait`", out)
+        out = sb.ok("note", "slow_check.py polls a gate file", "--kind", "code")
+        self.assertIn("NEXT: Wait for the running check T1", out)
+        sb.ok("hyp", "add", "the gate never opens")
+        for cmd in (("verify",), ("check",), ("lock",)):
+            rc, out = sb.sci(*cmd)
+            self.assertEqual(rc, 2, out)
+            self.assertIn("check T1 is still running (job", out)
+            self.assertIn("`.sci/sci wait`", out)
+        self.assertIn("RUNNING: check T1", sb.ok("resume"))
+        rc, out = sb.sci("wait", "--secs", "1")
+        self.assertEqual(rc, sci.JOB_RUNNING, out)
+        go.write_text("open")
+        rc, out = sb.sci("wait", "--secs", "90")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("PASS check T1", out)
+        st = sb.state()
+        self.assertTrue(st["tasks"][0]["last_check"]["ok"])
+        self.assertIn("polls a gate file", json.dumps(st["notes"]))
+        self.assertEqual(st["hyps"][0]["text"], "the gate never opens")
+        self.assertIn("already finished (exit 0)", sb.ok("wait"))
+
+    def test_edits_while_a_check_runs_void_its_result(self):
+        sb = Sandbox(self)
+        go = self._slow_task(sb)
+        rc, out = sb.sci("check", "--wait", "1")
+        self.assertEqual(rc, sci.JOB_RUNNING, out)
+        self._job(sb)  # the command runs, so its snapshot is taken
+        sb.write("pkg/core.py", sb.read("pkg/core.py") + "\n# edited mid-run\n")
+        go.write_text("open")
+        rc, out = sb.sci("wait", "--secs", "90")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("FILES EDITED WHILE THE CHECK RAN: pkg/core.py", out)
+        self.assertIsNone(sb.state()["tasks"][0].get("last_check"))
+        self.assertIn("PASS check T1", sb.ok("check"))
+
+    def test_output_a_check_rewrites_is_not_an_edit(self):
+        sb = Sandbox(self)
+        sb.init()
+        sb.ok("task", "add", "t", "--verify", "%s -c \"import time; open('out.csv', 'w').write(repr(time.time()))\""
+              % PYQ, "--scope", "pkg/core.py")
+        sb.ok("task", "start")
+        sb.ok("check")
+        out = sb.ok("check")
+        self.assertNotIn("FILES EDITED", out)
+        self.assertTrue(sb.state()["tasks"][0]["last_check"]["ok"])
+
+    def test_cancel_stops_a_running_job(self):
+        sb = Sandbox(self)
+        self._slow_task(sb)
+        rc, out = sb.sci("check", "--wait", "1")
+        self.assertEqual(rc, sci.JOB_RUNNING, out)
+        self._job(sb)
+        self.assertIn("Stopped job", sb.ok("cancel"))
+        self.assertNotIn("RUNNING", sb.ok("resume"))
+        self.assertIn("No background job is running", sb.ok("cancel"))
+        self.assertEqual(sb.state()["tasks"][0].get("last_check"), None)
+
+    def test_killed_worker_is_reported_as_interrupted(self):
+        sb = Sandbox(self)
+        go = self._slow_task(sb)
+        rc, out = sb.sci("check", "--wait", "1")
+        self.assertEqual(rc, sci.JOB_RUNNING, out)
+        job = self._job(sb)
+        kill_job(job)
+        rc, out = sb.sci("wait", "--secs", "60")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("INTERRUPTED: background job %d (check T1)" % job["n"], out)
+        self.assertIn("INTERRUPTED: background job %d" % job["n"], sb.ok("resume"))
+        go.write_text("open")
+        self.assertIn("PASS check T1", sb.ok("check"))
+
+    def test_foreground_mode(self):
+        sb = Sandbox(self)
+        sb.init()
+        sb.ok("task", "add", "t", "--verify", "true", "--scope", "x")
+        sb.ok("task", "start")
+        jobs = lambda: len(list((sb.root / ".sci" / "jobs").glob("*.json")))  # noqa: E731
+        sb.ok("check")
+        n = jobs()
+        self.assertGreater(n, 0)
+        sb.ok("config", "set", "background", "false")
+        self.assertIn("PASS check T1", sb.ok("check"))
+        self.assertIn("PASS check T1", sb.ok("check", env={"SCI_BACKGROUND": "0"}))
+        self.assertEqual(jobs(), n)
+
+
 class TestResumeAndHandoff(unittest.TestCase):
     def test_resume_restores_direction_after_compaction(self):
         sb = Sandbox(self)
@@ -978,6 +1268,119 @@ class TestUnits(unittest.TestCase):
                              ["python", "-m", "pytest", "tests/test_a.py", "-q"])
         finally:
             sci.WINDOWS = old
+
+
+class TestReuseUnits(unittest.TestCase):
+    def test_parse_test_cmd(self):
+        p = sci.parse_test_cmd
+        s = p("python -m pytest -q tests/test_a.py::TestA::test_x")
+        self.assertEqual((s["kind"], s["targets"], s["narrow"], s["stop"], s["unknown"]),
+                         ("pytest", ["tests/test_a.py"], False, False, False))
+        self.assertTrue(p("pytest -k slow")["narrow"])
+        self.assertTrue(p("pytest -x tests")["stop"])
+        self.assertTrue(p("pytest --weird-flag")["unknown"])
+        self.assertEqual(p("python3 -m unittest discover -s tests -p 'test_*.py' -q")["discover"],
+                         {"start": "tests", "pattern": "test_*.py"})
+        self.assertEqual(p("python3 -m unittest -q tests.test_a")["targets"], ["tests.test_a"])
+        self.assertEqual(p("python3 -m unittest")["discover"], {"start": ".", "pattern": "test*.py"})
+        for cmd in ("cd sub && pytest", "FOO=1 pytest", "make test", "python run_tests.py", "pytest | tee log"):
+            self.assertIsNone(p(cmd), cmd)
+
+    def test_suite_covers_only_what_it_surely_runs(self):
+        files = dict.fromkeys(["tests/__init__.py", "tests/test_a.py", "tests/test-b.py", "tests/sub/test_c.py",
+                               "tests/pkg/__init__.py", "tests/pkg/test_d.py"], ("100644", "0", 0))
+
+        def cov(suite, cmd, baseline=(), ini=None):
+            return sci.suite_covers(sci.parse_test_cmd(suite), cmd, files, ini or {}, list(baseline))
+
+        ut = "python -m unittest discover -s tests -q"
+        self.assertEqual(cov(ut, "python -m unittest tests.test_a -q"), ["tests/test_a.py"])
+        self.assertEqual(cov(ut, "python -m unittest tests.pkg.test_d.TestD.test_x"), ["tests/pkg/test_d.py"])
+        self.assertIsNone(cov(ut, "python -m unittest tests/test-b.py"))  # discovery skips non-module names
+        self.assertIsNone(cov(ut, "python -m unittest tests.sub.test_c"))  # no __init__.py: never discovered
+        self.assertIsNone(cov(ut, "python3 -m unittest tests.test_a"))  # another interpreter
+        self.assertIsNone(cov(ut + " -f", "python -m unittest tests.test_a"))  # stops at the first failure
+        self.assertIsNone(cov(ut + " -k fast", "python -m unittest tests.test_a"))
+        self.assertIsNone(cov(ut, "python -m unittest tests.test_a", ["test_a.TestA.test_old"]))  # known failure
+        self.assertIsNone(cov(ut, "python -m pytest tests/test_a.py"))
+        pt = "python -m pytest -q"
+        self.assertEqual(cov(pt, "python -m pytest tests/test_a.py -q"), ["tests/test_a.py"])
+        self.assertIsNone(cov(pt, "python -m pytest tests/test-b.py"))  # run by name, not collected by the suite
+        self.assertIsNone(cov(pt, "python -m pytest tests/test_a.py", ini={"addopts": ["-m", "not", "slow"]}))
+        self.assertIsNone(cov("python -m pytest tests/sub", "python -m pytest tests/test_a.py"))
+        self.assertEqual(sci.blame_tasks([("T1", ["tests/test_a.py"])], ["test_a.TestA.test_x", "test_z.T.t"]),
+                         [("T1", ["test_a.TestA.test_x"])])
+
+    def test_py_strings_skip_docstrings_and_comments(self):
+        s = sci.py_strings('"""Module doc: PLAN.md"""\n# comment: NOTES.md\nX = "data.md"\n\n\ndef f():\n'
+                           '    """Function doc: SPEC.md"""\n    return f"{X}.rst"\n')
+        self.assertIn("data.md", s)
+        self.assertIn(".rst", s)
+        for name in ("PLAN.md", "NOTES.md", "SPEC.md"):
+            self.assertNotIn(name, s)
+
+    def test_cacheable(self):
+        for cmd in ("python -m pytest -q", "../venv/bin/python -m pytest tests", "pytest -p no:cacheprovider"):
+            self.assertTrue(sci.cacheable(cmd), cmd)
+        for cmd in ("test -s ../data/run.h5", "cat /etc/hostname", "pytest --basetemp=/tmp/x", "echo $HOME",
+                    "python ~/probe.py"):
+            self.assertFalse(sci.cacheable(cmd), cmd)
+
+    def test_pass_records_need_the_same_code_and_packages(self):
+        st = {}
+        sci.note_result(st, "cmd:x", "fp1", True, 1.0, "envA")
+        self.assertTrue(sci.cached_pass(st, "cmd:x", "fp1", "envA"))
+        self.assertIsNone(sci.cached_pass(st, "cmd:x", "fp1", "envB"))
+        self.assertIsNone(sci.cached_pass(st, "cmd:x", "fp2", "envA"))
+        sci.note_result(st, "cmd:x", "fp1", False, 1.0, "envA")
+        self.assertIsNone(sci.cached_pass(st, "cmd:x", "fp1", "envA"))
+        self.assertEqual(st["durations"]["cmd:x"], 1.0)
+
+    def test_env_stamp_follows_the_virtualenv_packages(self):
+        tmp = Path(tempfile.mkdtemp(prefix="sci-env-"))
+        self.addCleanup(shutil.rmtree, str(tmp), True)
+        (tmp / "venv" / "bin").mkdir(parents=True)
+        (tmp / "venv" / "bin" / "python").write_text("")
+        (tmp / "venv" / "pyvenv.cfg").write_text("home = /usr/bin\n")
+        site = tmp / "venv" / "lib" / "python3.12" / "site-packages"
+        site.mkdir(parents=True)
+        os.utime(str(site), ns=(10**18, 10**18))
+
+        def stamp(cmd):
+            sci._ENV_MEMO.clear()
+            return sci.env_stamp(tmp, cmd)
+
+        a = stamp("venv/bin/python -m pytest -q")
+        self.assertTrue(a)
+        self.assertEqual(stamp("PYTHONPATH=. venv/bin/python -m pytest"), a)
+        os.utime(str(site), ns=(2 * 10**18, 2 * 10**18))  # pip install, upgrade or uninstall
+        self.assertNotEqual(stamp("venv/bin/python -m pytest -q"), a)
+        self.assertEqual(stamp("make test"), "")
+
+    def test_inert_docs(self):
+        sb = Sandbox(self)
+        for rel in ("README.md", "NOTES.md", "CHANGELOG.md", "docs/guide.md", "pkg/prompts/system.md"):
+            sb.write(rel, "text\n")
+        sb.write("tests/test_docs.py", '"""Mentions README.md and CHANGELOG.md in a docstring only."""\n'
+                 '# guide.md in a comment\nNOTES = "NOTES.md"\n')
+        sb.git("add", "-A")
+        sb.git("commit", "-q", "-m", "docs")
+        sb.init()
+        store = sci.Store(sci.Repo(sb.root))
+        store.load()
+
+        def inert():
+            tree, _ = sci.snapshot(store.repo, store.cfg)
+            return sci.inert_docs(store, tree, sci.tree_entries(store.repo, tree))
+
+        self.assertEqual(inert(), {"README.md", "CHANGELOG.md", "docs/guide.md"})  # NOTES.md is read; prompts too
+        store.cfg["build_cmd"] = "./tools/check_links docs"
+        self.assertEqual(inert(), {"README.md", "CHANGELOG.md"})
+        store.cfg["build_cmd"] = "markdownlint README.md"
+        self.assertEqual(inert(), set())
+        store.cfg["build_cmd"] = ""
+        sb.write("Makefile", "lint:\n\tcheck-links *.md\n")
+        self.assertEqual(inert(), set())
 
 
 class TestSnapshot(unittest.TestCase):

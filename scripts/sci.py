@@ -20,6 +20,7 @@ import base64
 import contextlib
 import datetime as _dt
 import difflib
+import fnmatch
 import functools
 import hashlib
 import json
@@ -31,10 +32,11 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
-VERSION = "3.1.1"
+VERSION = "3.2.0"
 SD = ".sci"
 SCHEMA = 1
 WINDOWS = os.name == "nt"
@@ -60,7 +62,15 @@ DEFAULT_CONFIG = {
         ".vscode/**", ".idea/**", "**/__pycache__/**", "**/*.pyc", "**/.pytest_cache/**",
         "**/.mypy_cache/**", "**/.ruff_cache/**", "**/.hypothesis/**", "**/.ipynb_checkpoints/**",
         "**/.DS_Store", "**/*.egg-info/**", ".coverage", "**/.coverage.*", "**/*.swp", "**/*~",
+        "graphify-out/**",
     ],
+    # Documentation: edits to these never make a verify stale, unless a test or a command reads the file.
+    "doc_globs": [
+        "**/*.md", "**/*.markdown", "**/*.rst", "**/*.adoc", "**/LICENSE", "**/LICENCE", "**/COPYING",
+        "**/AUTHORS", "**/CHANGELOG", "**/CHANGES", "**/NEWS", "**/HISTORY", "**/CITATION.cff",
+    ],
+    "background": True,
+    "wait_secs": 100,
     "check_timeout": 900,
     "verify_timeout": 3600,
     "tail_lines": 25,
@@ -134,7 +144,7 @@ def read_text(path):
         return None
 
 
-def atomic_write(path, text):
+def atomic_write(path, text, sync=True):
     """Write text exactly as given (no newline translation, so shell scripts keep LF on Windows)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -142,7 +152,8 @@ def atomic_write(path, text):
     with open(str(tmp), "w", encoding="utf-8", newline="\n") as f:
         f.write(text)
         f.flush()
-        os.fsync(f.fileno())
+        if sync:
+            os.fsync(f.fileno())
     for attempt in range(20):
         try:
             os.replace(str(tmp), str(path))
@@ -156,6 +167,15 @@ def atomic_write(path, text):
 def chunked(items, n):
     for i in range(0, len(items), n):
         yield items[i:i + n]
+
+
+def fmt_secs(s):
+    s = int(max(s or 0, 0))
+    if s < 60:
+        return "%ds" % s
+    if s < 3600:
+        return "%dm%02ds" % (s // 60, s % 60)
+    return "%dh%02dm" % (s // 3600, (s % 3600) // 60)
 
 
 _GLOB_CACHE = {}
@@ -271,39 +291,61 @@ def head_sha(repo):
 def snapshot(repo, cfg):
     """Tree id of the current worktree: tracked files plus small untracked files, never .sci/.
 
-    Uses a private index, so the user's index, branches and working tree are untouched."""
+    Files matching ignore_globs are left out, and tracked ones keep their committed content, so files that other
+    tools regenerate (caches, graphs) never count as changes. Uses a private index per process, so the user's
+    index, branches and working tree are untouched and two sci commands can snapshot at the same time."""
     bd = repo.backup_dir
     bd.mkdir(parents=True, exist_ok=True)
-    tmp = bd / "snap.index"
+    tmp = bd / ("snap.%d.index" % os.getpid())
     real = repo.git_path("index")
-    if real.exists():
-        # copy2 keeps the index mtime: git's racy-entry detection depends on it. A fresh mtime would make a
-        # same-size rewrite within the same second as the cached stat look unchanged.
-        shutil.copy2(str(real), str(tmp))
-    elif tmp.exists():
-        tmp.unlink()
-    env = dict(os.environ)
-    env["GIT_INDEX_FILE"] = str(tmp)
-    git(repo.root, ["add", "-u"], env=env)
-    git(repo.root, ["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", SD], env=env)
-    out = git(repo.root, ["ls-files", "--others", "--exclude-standard", "-z", "--", ".",
-                          ":(exclude)" + SD], env=env).stdout
-    limit = int(cfg.get("snapshot_max_kb", 512)) * 1024
-    small, big = [], []
-    for p in out.split("\0"):
-        if not p or p.endswith("/") or match_any(p, cfg.get("ignore_globs")):
-            continue
-        try:
-            size = os.lstat(str(repo.root / p)).st_size
-        except OSError:
-            continue
-        if size <= limit:
-            small.append(p)
-        else:
-            big.append((p, size))
-    for chunk in chunked(small, 200):
-        git(repo.root, ["add", "--"] + chunk, env=env)
-    return git(repo.root, ["write-tree"], env=env).stdout.strip(), big
+    try:
+        if real.exists():
+            # copy2 keeps the index mtime: git's racy-entry detection depends on it. A fresh mtime would make a
+            # same-size rewrite within the same second as the cached stat look unchanged.
+            shutil.copy2(str(real), str(tmp))
+        elif tmp.exists():
+            tmp.unlink()
+        env = dict(os.environ)
+        env["GIT_INDEX_FILE"] = str(tmp)
+        ign = cfg.get("ignore_globs") or []
+        held = ""
+        if ign and tmp.exists():
+            specs = []
+            for g in (x.strip() for x in ign):
+                g = g[2:] if g.startswith("./") else g
+                if g:
+                    specs.append((":(glob)" if any(c in g for c in "*?[") else ":(literal)") + g)
+            ign_tracked = [p for p in git(repo.root, ["ls-files", "-z", "--"] + specs, env=env, check=False)
+                           .stdout.split("\0") if p and match_any(p, ign)]
+            for chunk in chunked(ign_tracked, 200):
+                lit = [":(literal)" + p for p in chunk]
+                if git(repo.root, ["diff", "--name-only", "-z", "--"] + lit, env=env).stdout.strip("\0"):
+                    held += git(repo.root, ["ls-files", "-s", "-z", "--"] + lit, env=env).stdout
+        git(repo.root, ["add", "-u"], env=env)
+        if held:
+            git(repo.root, ["update-index", "-z", "--index-info"], env=env, input=held)
+        git(repo.root, ["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", SD], env=env)
+        out = git(repo.root, ["ls-files", "--others", "--exclude-standard", "-z", "--", ".",
+                              ":(exclude)" + SD], env=env).stdout
+        limit = int(cfg.get("snapshot_max_kb", 512)) * 1024
+        small, big = [], []
+        for p in out.split("\0"):
+            if not p or p.endswith("/") or match_any(p, ign):
+                continue
+            try:
+                size = os.lstat(str(repo.root / p)).st_size
+            except OSError:
+                continue
+            if size <= limit:
+                small.append(p)
+            else:
+                big.append((p, size))
+        for chunk in chunked(small, 200):
+            git(repo.root, ["add", "--"] + [":(literal)" + p for p in chunk], env=env)
+        return git(repo.root, ["write-tree"], env=env).stdout.strip(), big
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
 
 
 def snap_commit(repo, tree, msg):
@@ -371,9 +413,10 @@ def untracked_list(repo, cfg):
                   if p and not p.endswith("/") and not match_any(p, cfg.get("ignore_globs")))
 
 
-def dirty_tracked(repo):
+def dirty_tracked(repo, cfg=None):
     out = git(repo.root, ["diff", "--name-only", "-z", "HEAD", "--"], check=False).stdout
-    return sorted(p for p in out.split("\0") if p and not p.startswith(SD + "/"))
+    ign = (cfg or {}).get("ignore_globs")
+    return sorted(p for p in out.split("\0") if p and not p.startswith(SD + "/") and not match_any(p, ign))
 
 
 # --------------------------------------------------------------------------- state
@@ -386,7 +429,7 @@ def new_state(objective):
         "next_task": 1, "next_hyp": 1, "next_note": 1, "hyps": [], "notes": [], "now": None,
         "goldens": {}, "protected": {}, "acks": {}, "review": [], "baseline": None, "runs": 0,
         "paused": False, "last_verify": None, "violations": [], "last_build_tree": None,
-        "autopilot_streak": 0,
+        "autopilot_streak": 0, "passes": {}, "durations": {},
     }
 
 
@@ -411,8 +454,9 @@ def upgrade_state(st):
 
 
 @contextlib.contextmanager
-def state_lock(repo, required=True):
-    """Exclusive per-repo lock. Yields True if held. With required=False a busy lock yields False."""
+def file_lock(path, wait=0.0):
+    """Exclusive advisory lock on a file (flock; msvcrt on Windows). Yields True if it was acquired within `wait`
+    seconds, else False."""
     try:
         import fcntl
     except ImportError:
@@ -421,21 +465,23 @@ def state_lock(repo, required=True):
         import msvcrt
     except ImportError:
         msvcrt = None
-    repo.dir.mkdir(parents=True, exist_ok=True)
-    f = open(str(repo.dir / ".lock"), "a+")
-    held, win_locked = True, False
+    f = open(str(path), "a+")
+    held, win_locked = fcntl is None and msvcrt is None, False
+    deadline = time.time() + wait
     try:
-        try:
-            if fcntl is not None:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            elif msvcrt is not None:
-                f.seek(0)
-                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
-                win_locked = True
-        except OSError:
-            if required:
-                raise Refuse("Another sci command is running in this repo. Wait for it to finish, then retry.")
-            held = False
+        while not held:
+            try:
+                if fcntl is not None:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                else:
+                    f.seek(0)
+                    msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                    win_locked = True
+                held = True
+            except OSError:
+                if time.time() >= deadline:
+                    break
+                time.sleep(0.05)
         yield held
     finally:
         if win_locked:
@@ -443,6 +489,51 @@ def state_lock(repo, required=True):
                 f.seek(0)
                 msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
         f.close()
+
+
+@contextlib.contextmanager
+def state_lock(repo, required=True):
+    """Short lock around reading and writing state.json. Long commands take it only to read the state before they
+    run something and to save the result, so `note`, `hyp` and `now` work while a long verify runs."""
+    repo.dir.mkdir(parents=True, exist_ok=True)
+    with file_lock(repo.dir / ".lock", wait=30.0 if required else 3.0) as held:
+        if not held and required:
+            raise Refuse("Another sci command kept the state locked for 30 s. Retry in a moment.")
+        yield held
+
+
+@contextlib.contextmanager
+def locked(store):
+    """The state lock, with state and config re-read from disk: another command (say, a verify finishing in the
+    background) may have saved since this one started. Look tasks up again inside the block."""
+    with state_lock(store.repo):
+        store.load()
+        yield store.st, store.cfg
+
+
+_RUN_LOCK_HELD = []  # non-empty while this process holds the run lock
+
+
+@contextlib.contextmanager
+def run_lock(repo):
+    """Held for the whole of check/verify/run/baseline/golden, and by commands that change files or task status
+    (done, restore, lock, unlock, task start/block). Only one of them runs at a time in a repo."""
+    if _RUN_LOCK_HELD or not repo.dir.is_dir():
+        yield  # not set up yet: the command itself refuses
+        return
+    with file_lock(repo.dir / ".run.lock", wait=2.0) as held:
+        if not held:
+            refuse(*busy_text(repo))
+        _RUN_LOCK_HELD.append(True)
+        try:
+            mark_stale_jobs(repo)
+            if starting_job(repo):
+                refuse(*busy_text(repo))
+            if JOB:
+                job_update(state="running", pid=os.getpid())
+            yield
+        finally:
+            del _RUN_LOCK_HELD[:]
 
 
 class Store:
@@ -454,6 +545,7 @@ class Store:
         self.st = None
         self.cfg = None
         self.warnings = []
+        self.max_run = 0  # highest run number this process used; survives a reload of the state
 
     def exists(self):
         return self.state_path.exists()
@@ -479,13 +571,20 @@ class Store:
         cfg = dict(DEFAULT_CONFIG)
         cfg.update(self._read_json(self.config_path, "config.json") or {})
         self.st, self.cfg = upgrade_state(st), cfg
+        self.st["runs"] = max(int(self.st.get("runs") or 0), self.max_run)
         return self.st, self.cfg
 
-    def save(self, live_tree=None):
+    def save(self, live_tree=None, live_fp=None):
         st = self.st
         st["updated"] = now_iso()
         st["version"] = VERSION
-        st["next"] = compute_next(st, self.cfg, live_tree)
+        if live_tree and live_fp is None:
+            t = active_task(st)
+            lv = st.get("last_verify") or {}
+            if (t and t.get("verified_fp") and t.get("verified_tree") not in (None, live_tree)) or (
+                    not t and lv.get("fp") and lv.get("tree") != live_tree):
+                live_fp = code_fp(self, live_tree)
+        st["next"] = compute_next(st, self.cfg, live_tree, live_fp, running_job(self.repo))
         st["anchor"] = anchor_block(st)
         self.repo.dir.mkdir(parents=True, exist_ok=True)
         if self.state_path.exists():
@@ -559,6 +658,23 @@ def spec_hash(t):
 
 def is_test(path, cfg):
     return match_any(path, cfg.get("test_globs"))
+
+
+def is_doc(path, cfg):
+    return match_any(path, cfg.get("doc_globs")) and not is_test(path, cfg)
+
+
+def verified_docs_since(store, t, cur_tree):
+    """None if the task is not verified on these files. Otherwise the documentation files changed since its verify
+    (empty if nothing changed): edits to docs no check reads leave the verification valid."""
+    vt = t.get("verified_tree")
+    if not vt:
+        return None
+    if vt == cur_tree:
+        return []
+    if not t.get("verified_fp") or code_fp(store, cur_tree) != t["verified_fp"]:
+        return None
+    return [p for _, p in tree_changes(store.repo, vt, cur_tree)]
 
 
 def is_locked(t):
@@ -754,11 +870,24 @@ def kill_tree(p):
         p.wait()
 
 
+def next_run_number(store):
+    """Run numbers come from the state and the saved logs, so a runner never needs the state lock to number its
+    logs (only one runner works at a time: it holds the run lock)."""
+    top = max(int(store.st.get("runs") or 0), store.max_run)
+    with contextlib.suppress(OSError):
+        for p in (store.repo.dir / "runs").glob("*.log"):
+            head = p.name.split("-", 1)[0]
+            if head.isdigit():
+                top = max(top, int(head))
+    store.max_run = top + 1
+    store.st["runs"] = top + 1
+    return top + 1
+
+
 def run_cmd(store, cmd, kind, task_id=None, timeout=900):
     """Run a shell command from the repo root; full output goes to .sci/runs/, never to the screen."""
-    st, cfg, repo = store.st, store.cfg, store.repo
-    st["runs"] = int(st.get("runs") or 0) + 1
-    n = st["runs"]
+    cfg, repo = store.cfg, store.repo
+    n = next_run_number(store)
     runs = repo.dir / "runs"
     runs.mkdir(parents=True, exist_ok=True)
     log = runs / ("%04d-%s%s.log" % (n, kind, ("-" + task_id) if task_id else ""))
@@ -782,6 +911,7 @@ def run_cmd(store, cmd, kind, task_id=None, timeout=900):
             p = None
         rc = 127
         if p is not None:
+            job_update(child=p.pid)
             try:
                 rc = p.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
@@ -792,6 +922,8 @@ def run_cmd(store, cmd, kind, task_id=None, timeout=900):
             except KeyboardInterrupt:
                 kill_tree(p)
                 raise
+            finally:
+                job_update(child=None)
     secs = time.time() - t0
     keep = int(cfg.get("keep_runs") or 80)
     old = sorted(runs.glob("*.log"))
@@ -1112,11 +1244,532 @@ def guard_fix_hint(viols):
             "`.sci/sci unlock %s --reason \"<why>\"` (flagged for human review)." % (target, target))
 
 
+# --------------------------------------------------------------------------- change-aware verification
+#
+# verify never repeats work whose answer it already has:
+#   - a step whose command passed on byte-identical code is reused. "Code" is every file in the snapshot except
+#     documentation that no test or check command reads, so editing a README or CHANGELOG does not force a rerun;
+#   - an earlier task's check whose tests the regression suite runs anyway is left to the suite, so no test runs
+#     twice in one verify.
+
+def tree_entries(repo, tree):
+    """{path: (mode, blob id, size)} of every file in a tree object."""
+    files = {}
+    for rec in git(repo.root, ["ls-tree", "-r", "-l", "-z", tree]).stdout.split("\0"):
+        meta, sep, path = rec.partition("\t")
+        parts = meta.split()
+        if sep and len(parts) >= 4:
+            files[path] = (parts[0], parts[2], int(parts[3]) if parts[3].isdigit() else 0)
+    return files
+
+
+def cat_blobs(repo, shas):
+    """{blob id: text}, read with one `git cat-file --batch`."""
+    want = sorted(set(shas))
+    if not want:
+        return {}
+    p = subprocess.run(["git", "cat-file", "--batch"], cwd=str(repo.root), input=("\n".join(want) + "\n").encode(),
+                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    data, res, i = p.stdout, {}, 0
+    while i < len(data):
+        nl = data.find(b"\n", i)
+        if nl < 0:
+            break
+        head = data[i:nl].split()
+        i = nl + 1
+        if len(head) < 3 or not head[2].isdigit():
+            continue  # "<id> missing"
+        size = int(head[2])
+        res[head[0].decode("ascii", "replace")] = data[i:i + size].decode("utf-8", "replace")
+        i += size + 1
+    return res
+
+
+def step_commands(st, cfg):
+    """The commands `verify` runs now: the active task's check, finished tasks' checks, goldens, the regression
+    suite and the build. A document one of them names is something a check reads."""
+    t = active_task(st)
+    cmds = [d.get("verify") or "" for d in st["tasks"] if d["status"] == "done" or (t and d["id"] == t["id"])]
+    cmds += [(g or {}).get("cmd") or "" for g in (st.get("goldens") or {}).values()]
+    cmds += [cfg.get(k) or "" for k in ("regress_cmd", "build_cmd")]
+    return [c for c in cmds if c]
+
+
+def all_commands(st, cfg):
+    """Every command sci knows, including those of tasks not started yet: a script one of them names is read
+    like source code."""
+    cmds = [d.get("verify") or "" for d in st["tasks"]]
+    cmds += [(g or {}).get("cmd") or "" for g in (st.get("goldens") or {}).values()]
+    cmds += [cfg.get(k) or "" for k in ("regress_cmd", "test_cmd", "build_cmd")]
+    return [c for c in cmds if c]
+
+
+def py_strings(text):
+    """String literals of Python source, except docstrings: those cite documents, they don't read them."""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return text
+    docs = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.body:
+            first = node.body[0]
+            if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+                    and isinstance(first.value.value, str)):
+                docs.add(id(first.value))
+    return "\n".join(n.value for n in ast.walk(tree)
+                     if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docs)
+
+
+DOC_TOOLS = frozenset("codespell cspell markdownlint markdownlint-cli2 mdl mdformat prettier vale proselint doc8 "
+                      "rstcheck sphinx-build mkdocs lychee markdown-link-check linkchecker pandoc typos remark "
+                      "textlint pre-commit".split())
+BUILD_FILE_RE = re.compile(r"(?:^|/)(?:GNUmakefile|[Mm]akefile|[^/]+\.mk|[Jj]ustfile|tox\.ini|CMakeLists\.txt|"
+                           r"[^/]+\.cmake|Taskfile\.ya?ml)$")
+
+
+def doc_mentions(text, refs):
+    """The document names (lowercase basenames) and extensions that `text` mentions."""
+    low = text.lower()
+    found = set(tok for tok in (m.group(0).rstrip(".-") for m in re.finditer(r"[\w.-]+", low)) if tok in refs["names"])
+    found.update(n for n in refs["odd"] if n in low)
+    found.update(e for e in re.findall(r"(?<![\w-])(\.\w+)", low) if e in refs["exts"])
+    return found
+
+
+_REFS_MEMO = {}
+
+
+def doc_refs(store, tree, files):
+    """What snapshot `tree` says about its documentation files (doc_globs): which ones exist, the names and
+    extensions that source code, tests, build files (Makefile, tox.ini ...) or scripts named by a sci command
+    mention, and the directories that hold source code. Python docstrings and comments do not count: they cite
+    documents, they don't read them. Neither does setup.py: it reads the README to build a package."""
+    cfg = store.cfg
+    cmds = all_commands(store.st, cfg)
+    key = (tree, json.dumps([cfg.get("doc_globs"), cfg.get("test_globs"), cmds]))
+    if key in _REFS_MEMO:
+        return _REFS_MEMO[key]
+    docs = [p for p in files if is_doc(p, cfg)]
+    names = set(p.rsplit("/", 1)[-1].lower() for p in docs)
+    refs = {"docs": docs, "names": names, "exts": set(os.path.splitext(n)[1] for n in names) - {""},
+            "odd": set(n for n in names if not re.match(r"^[\w.-]+$", n)),  # spaces etc.: substring search
+            "code_dirs": set(p.rsplit("/", 1)[0] for p in files if "/" in p and SRC_EXT_RE.search(p)),
+            "hits": set()}
+    if docs:
+        refs["hits"] = doc_mentions(" ".join(pytest_ini(store.repo.root).get("addopts") or []), refs)
+        named = set(_norm_target(w) for c in cmds for w in verify_tokens(c))
+        readers = set(p for p in files if p not in docs and p.rsplit("/", 1)[-1] != "setup.py" and (
+            SRC_EXT_RE.search(p) or is_test(p, cfg) or BUILD_FILE_RE.search(p) or p in named))
+        # `git grep` finds the few files that mention any document at all; only those are read and parsed.
+        pf = store.repo.dir / ("needles.%d" % os.getpid())
+        try:
+            atomic_write(pf, "\n".join(sorted(names | refs["exts"])) + "\n", sync=False)
+            g = git(store.repo.root, ["grep", "-I", "-l", "-i", "-F", "-z", "-f", str(pf), tree], check=False)
+        finally:
+            with contextlib.suppress(OSError):
+                pf.unlink()
+        found = [p for p in (rec.split(":", 1)[-1] for rec in g.stdout.split("\0") if rec) if p in readers]
+        blobs = cat_blobs(store.repo, [files[p][1] for p in found])
+        for p in found:
+            text = blobs.get(files[p][1]) or ""
+            refs["hits"] |= doc_mentions(py_strings(text) if p.endswith(".py") else text, refs)
+    _REFS_MEMO[key] = refs
+    return refs
+
+
+def inert_docs(store, tree, files, cmds=None):
+    """Documentation files that the commands `cmds` (default: everything verify runs) cannot read, so editing them
+    cannot change a result. A document is not inert if it sits in a test directory or below a directory that
+    holds source code (package data such as a prompt template), if source code, a test or a build file names it
+    or its extension (see doc_refs), if a command runs a documentation tool, or if a command names the document,
+    its directory or (like a link checker that globs `*.md`) its extension."""
+    refs = doc_refs(store, tree, files)
+    if not refs["docs"]:
+        return set()
+    cmds = step_commands(store.st, store.cfg) if cmds is None else [c for c in cmds if c]
+    if any(w.rsplit("/", 1)[-1].lower() in DOC_TOOLS for c in cmds for w in verify_tokens(c)):
+        return set()
+    named_dirs = set()
+    for c in cmds:
+        if parse_test_cmd(c):
+            continue  # pytest and unittest read Python files; a doctest glob (*.md) counts as an extension
+        for w in verify_tokens(c)[1:]:
+            v = _norm_target(w.split("=", 1)[-1] if w.startswith("-") else w)
+            if v not in (".", "..") and not v.startswith(("../", "/")):
+                named_dirs.add(v)
+    hits = refs["hits"] | doc_mentions("\n".join(cmds), refs)
+
+    def inert(p):
+        name = p.rsplit("/", 1)[-1].lower()
+        if name in hits or os.path.splitext(name)[1] in hits:
+            return False
+        d = p
+        while "/" in d:
+            d = d.rsplit("/", 1)[0]
+            if d in refs["code_dirs"] or d in named_dirs:
+                return False
+        return True
+
+    return set(p for p in refs["docs"] if inert(p))
+
+
+_FP_MEMO = {}
+
+
+def code_fp(store, tree, cmds=None):
+    """Fingerprint of what checks can see in snapshot `tree`: every file except documentation they cannot read.
+    `cmds` are the commands of one verify step (with the build); by default everything verify runs."""
+    cfg = store.cfg
+    cmds = step_commands(store.st, cfg) if cmds is None else [c for c in cmds if c]
+    salt = sha256_text(json.dumps([cfg.get("doc_globs"), cfg.get("test_globs"), all_commands(store.st, cfg), cmds]))
+    key = "%s:%s" % (tree, salt[:16])
+    if key in _FP_MEMO:
+        return _FP_MEMO[key]
+    path = store.repo.dir / "fingerprints.json"
+    try:
+        cache = json.loads(read_text(path) or "{}")
+    except ValueError:
+        cache = {}
+    fp = cache.pop(key, None)
+    if not fp:
+        files = tree_entries(store.repo, tree)
+        skip = inert_docs(store, tree, files, cmds)
+        h = hashlib.sha256()
+        for p in sorted(files):
+            if p not in skip:
+                h.update(("%s %s %s\n" % (files[p][0], files[p][1], p)).encode("utf-8"))
+        fp = h.hexdigest()
+    cache[key] = fp
+    with contextlib.suppress(OSError):
+        atomic_write(path, json.dumps(dict(list(cache.items())[-200:])), sync=False)
+    _FP_MEMO[key] = fp
+    return fp
+
+
+def step_fp(store, tree, cmd):
+    """Fingerprint for reusing one step's PASS: only documents that this command (or the build) reads count."""
+    return code_fp(store, tree, [cmd, store.cfg.get("build_cmd") or ""])
+
+
+def cacheable(cmd):
+    """Reuse a PASS only for commands that read nothing outside the repository except the program itself
+    (`../venv/bin/python -m pytest` qualifies; `test -s ../data/run.h5` does not)."""
+    for tok in verify_tokens(cmd)[1:]:
+        v = tok.split("=", 1)[-1] if tok.startswith("-") else tok
+        if v == ".." or v.startswith(("../", "/", "~", "$")) or re.match(r"^[A-Za-z]:/", v):
+            return False
+    return True
+
+
+_ENV_MEMO = {}
+
+
+def env_stamp(root, cmd):
+    """When the packages a check's program can import last changed ('' if sci cannot tell): the change times of
+    the site-packages folders of the program's virtualenv or conda environment, or of a plain interpreter's own
+    site folders. Installing, upgrading or removing a package changes them, so an earlier PASS is not reused."""
+    toks = verify_tokens(cmd)
+    while toks and re.match(r"^\w+=", toks[0]):
+        toks = toks[1:]
+    if not toks:
+        return ""
+    prog = toks[0]
+    if prog in _ENV_MEMO:
+        return _ENV_MEMO[prog]
+    root, envs, sites = Path(root), [], []
+    if prog in ("uv", "poetry", "pipenv", "pdm", "rye", "hatch", "pixi"):
+        envs = [root / ".venv", root / "venv"] + sorted((root / ".pixi" / "envs").glob("*"))
+    else:
+        found = prog if "/" in prog or "\\" in prog else shutil.which(prog)
+        exe = Path(found) if found else None
+        if exe is not None and not exe.is_absolute():
+            exe = root / exe
+        envs = [d for d in ((exe.parent, exe.parent.parent) if exe else ())
+                if (d / "pyvenv.cfg").is_file() or (d / "conda-meta").is_dir()][:1]
+        if exe and not envs and PY_PROG_RE.search(prog):
+            argv = [str(exe)] + [a for a in toks[1:2] if re.match(r"^-\d[\d.]*$", a)]  # py -3
+            code = "import site; print('\\n'.join(site.getsitepackages() + [site.getusersitepackages()]))"
+            with contextlib.suppress(OSError, subprocess.SubprocessError, AttributeError):
+                p = subprocess.run(argv + ["-c", code], cwd=str(root), stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, encoding="utf-8", errors="replace", timeout=20)
+                sites = [Path(s) for s in p.stdout.splitlines() if s.strip()]
+    for e in envs:
+        sites += [e / "conda-meta", e / "Lib" / "site-packages", e / "lib" / "site-packages"]
+        sites += sorted(e.glob("lib/python*/site-packages")) + sorted(e.glob("lib64/python*/site-packages"))
+    marks = []
+    for s in sites:
+        with contextlib.suppress(OSError):
+            marks.append("%s=%d" % (s, s.stat().st_mtime_ns))
+    _ENV_MEMO[prog] = sha256_text("\n".join(marks))[:12] if marks else ""
+    return _ENV_MEMO[prog]
+
+
+def cached_pass(st, key, fp, env=""):
+    rec = (st.get("passes") or {}).get(key)
+    return rec if rec and rec.get("fp") == fp and rec.get("env", "") == env else None
+
+
+def note_result(st, key, fp, ok, secs, env=""):
+    """Remember the code fingerprint and package environment a check last passed on, and how long it took."""
+    for name, rec in (("passes", {"fp": fp, "env": env, "t": now_iso(), "secs": round(secs, 1)} if ok and fp
+                       else None), ("durations", round(secs, 1))):
+        d = st.setdefault(name, {})
+        d.pop(key, None)
+        if rec is not None:
+            d[key] = rec
+        for k in list(d)[:-300]:
+            del d[k]
+
+
+PY_PROG_RE = re.compile(r"(?:^|/)(?:python[\d.]*|pypy[\d.]*|py)(?:\.exe)?$", re.I)
+PYTEST_FLAGS = frozenset("-q -qq -qqq -v -vv -vvv -s -l --showlocals --verbose --quiet --no-header --no-summary "
+                         "--disable-warnings --disable-pytest-warnings --strict-markers --strict --ff --failed-first "
+                         "--nf --new-first".split())
+PYTEST_VALUED = frozenset("--tb --color --durations --durations-min --capture -n --numprocesses --dist "
+                          "--maxprocesses".split())
+PYTEST_NARROWING = frozenset("-x --exitfirst --sw --stepwise --lf --last-failed -k -m --deselect --ignore "
+                             "--ignore-glob --maxfail".split())
+UNITTEST_FLAGS = frozenset("-v --verbose -q --quiet -b --buffer -c --catch --locals".split())
+PYTEST_NORECURSE = ("*.egg", ".*", "_darcs", "build", "CVS", "dist", "node_modules", "venv", "{arch}")
+
+
+def cmd_words(cmd):
+    """Shell words of a plain command; None if it has shell operators, redirections or env assignments."""
+    if WINDOWS:
+        cmd = cmd.replace("\\", "/")
+    try:
+        lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        toks = list(lex)
+    except ValueError:
+        return None
+    if not toks or re.match(r"^\w+=", toks[0]) or any(t and all(c in "();<>|&" for c in t) for t in toks):
+        return None
+    return toks
+
+
+def parse_test_cmd(cmd):
+    """What a plain `pytest ...` or `python -m pytest|unittest ...` command runs, and whether it narrows the
+    selection or stops early. None for anything else (scripts, other runners, pipelines)."""
+    toks = cmd_words(cmd or "")
+    if not toks:
+        return None
+    pre = []
+    if len(toks) > 2 and toks[0] in ("uv", "poetry", "pipenv", "pdm", "rye", "hatch") and toks[1] == "run":
+        pre, toks = toks[:2], toks[2:]
+    base = toks[0].rsplit("/", 1)[-1].lower()
+    base = base[:-4] if base.endswith(".exe") else base
+    if base in ("pytest", "py.test"):
+        spec, i = {"kind": "pytest", "form": "prog", "interp": " ".join(pre + toks[:1])}, 1
+    elif PY_PROG_RE.search(toks[0]):
+        i = 1
+        while i < len(toks) and (toks[i] in ("-B", "-u", "-E", "-s", "-I")
+                                 or (base == "py" and re.match(r"^-\d[\d.]*$", toks[i]))):
+            i += 1
+        if i + 1 >= len(toks) or toks[i] != "-m" or toks[i + 1] not in ("pytest", "py.test", "unittest"):
+            return None
+        spec = {"kind": "unittest" if toks[i + 1] == "unittest" else "pytest", "form": "python",
+                "interp": " ".join(pre + toks[:i])}
+        i += 2
+    else:
+        return None
+    rest = toks[i:]
+    spec.update({"targets": [], "discover": None, "narrow": False, "stop": False, "unknown": False})
+    j = 0
+    if spec["kind"] == "unittest":
+        disc = bool(rest) and rest[0] == "discover"
+        d, pos, j = {"start": ".", "pattern": "test*.py"}, [], (1 if disc else 0)
+        while j < len(rest):
+            a = rest[j]
+            if disc and a in ("-s", "--start-directory", "-p", "--pattern", "-t", "--top-level-directory"):
+                if j + 1 < len(rest) and a in ("-s", "--start-directory", "-p", "--pattern"):
+                    d["start" if a in ("-s", "--start-directory") else "pattern"] = rest[j + 1]
+                j += 2
+                continue
+            if a in ("-f", "--failfast"):
+                spec["stop"] = True
+            elif a == "-k" or a == "--durations":
+                spec["narrow"] = spec["narrow"] or a == "-k"
+                j += 1
+            elif a.startswith("-k"):
+                spec["narrow"] = True
+            elif a.startswith("-") and a not in UNITTEST_FLAGS:
+                spec["unknown"] = True
+            elif not a.startswith("-"):
+                pos.append(a)
+            j += 1
+        if disc or not pos:  # a bare `python -m unittest` discovers from the current directory
+            d.update(zip(("start", "pattern"), pos if disc else []))
+            spec["discover"] = d
+        else:
+            spec["targets"] = pos
+        return spec
+    while j < len(rest):
+        a = rest[j]
+        if (a in PYTEST_FLAGS or re.match(r"^-r\w+$|^-n(?:\d+|auto|logical)$|^-pno:", a)
+                or ("=" in a and a.split("=", 1)[0] in PYTEST_VALUED)):
+            pass
+        elif a in PYTEST_VALUED or (a == "-p" and rest[j + 1:j + 2] and rest[j + 1].startswith("no:")):
+            j += 1
+        elif a in ("-k", "--deselect") or a.startswith(("-k", "--deselect=")) or a in ("--lf", "--last-failed"):
+            spec["narrow"] = True
+            j += 1 if a in ("-k", "--deselect") else 0
+        elif a in ("-x", "--exitfirst", "--sw", "--stepwise") or a.startswith("--maxfail"):
+            spec["stop"] = True
+            j += 1 if a == "--maxfail" else 0
+        elif a.startswith("-"):
+            spec["unknown"] = True
+            break
+        else:
+            spec["targets"].append(a.split("::", 1)[0].split("[", 1)[0])
+        j += 1
+    return spec
+
+
+def pytest_ini(root):
+    """testpaths / python_files / norecursedirs / addopts of the first pytest config file with a pytest section."""
+    for name, sect in (("pytest.ini", "pytest"), ("pyproject.toml", "tool.pytest.ini_options"), ("tox.ini", "pytest"),
+                       ("setup.cfg", "tool:pytest")):
+        text = read_text(Path(root) / name)
+        m = re.search(r"(?ms)^\[" + re.escape(sect) + r"\][ \t]*$(.*?)(?=^\[|\Z)", text or "")
+        if not m:
+            continue
+        res = {}
+        for key in ("testpaths", "python_files", "norecursedirs", "addopts"):
+            mm = re.search(r"(?m)^[ \t]*" + key + r"[ \t]*=[ \t]*(.*(?:\n[ \t]+\S.*)*)", m.group(1))
+            if mm:
+                res[key] = re.findall(r"[^\s,\[\]\"']+", mm.group(1))
+        return res
+    return {}
+
+
+def _norm_target(t):
+    t = t.replace("\\", "/")
+    while t.startswith("./"):
+        t = t[2:]
+    return t.rstrip("/") or "."
+
+
+def _under(path, d):
+    return d == "." or path == d or path.startswith(d + "/")
+
+
+def unittest_runs(d, path, files):
+    """Would `python -m unittest discover -s START -p PATTERN`, run from the repo root, import test file `path`?
+    Discovery imports only files whose names are module names (test-io.py is skipped) inside packages."""
+    start = _norm_target(d["start"])
+    name = path.rsplit("/", 1)[-1]
+    if not re.match(r"[_a-z]\w*\.py\Z", name, re.I) or not fnmatch.fnmatchcase(name, d["pattern"]):
+        return False
+    if not _under(path, start):
+        return False
+    base = "" if start == "." else start + "/"
+    parts = path[len(base):].split("/")[:-1]
+    return all(base + "/".join(parts[:k]) + "/__init__.py" in files for k in range(1, len(parts) + 1))
+
+
+def pytest_runs(spec, ini, path):
+    """Would this pytest command collect test file `path`?"""
+    targets = ([_norm_target(t) for t in spec["targets"]] or [_norm_target(t) for t in ini.get("testpaths") or []]
+               or ["."])
+    pats = ini.get("python_files") or ["test_*.py", "*_test.py"]
+    skip = ini.get("norecursedirs") or PYTEST_NORECURSE
+    for tg in targets:
+        if path == tg:
+            return True
+        if not _under(path, tg):
+            continue
+        dirs = (path if tg == "." else path[len(tg) + 1:]).split("/")[:-1]
+        if not any(fnmatch.fnmatchcase(x, s) for x in dirs for s in skip) and any(
+                fnmatch.fnmatchcase(path.rsplit("/", 1)[-1], p) for p in pats):
+            return True
+    return False
+
+
+def test_files_of(spec, files, ini):
+    """Repo paths of the test files a parsed test command runs; None when that cannot be told."""
+    if spec["discover"] is not None:
+        return [p for p in files if unittest_runs(spec["discover"], p, files)] or None
+    res = []
+    for t in (_norm_target(x) for x in spec["targets"]):
+        if spec["kind"] == "unittest" and not t.endswith(".py"):
+            parts = t.split(".")
+            hit = next((c for c in ("/".join(parts[:k]) + ".py" for k in range(len(parts), 0, -1)) if c in files), None)
+            if not hit:
+                return None
+            res.append(hit)
+        elif t in files:
+            res.append(t)
+        else:
+            sub = [p for p in files if spec["kind"] == "pytest" and p.endswith(".py") and _under(p, t)
+                   and pytest_runs({"targets": [t]}, ini, p)]
+            if not sub:
+                return None
+            res += sub
+    return res or None
+
+
+def _stems(paths):
+    return set(p.rsplit("/", 1)[-1][:-3] for p in paths if p.endswith(".py"))
+
+
+def _id_parts(test_id):
+    return set(re.split(r"[/.:\\]+", test_id))
+
+
+def suite_covers(suite, cmd, files, ini, baseline):
+    """The test files of check `cmd` if the regression suite (parsed) is sure to run every one of them, else None.
+
+    Only plain pytest/unittest commands with the same interpreter qualify. A suite that narrows the selection
+    (-k, -m, --ignore ...), stops at the first failure (-x, -f) or has options sci does not know covers nothing,
+    and neither does a test file with a known baseline failure (the suite tolerates that file failing)."""
+    task = parse_test_cmd(cmd)
+    if not suite or not task or task["unknown"] or suite["unknown"] or suite["narrow"] or suite["stop"]:
+        return None
+    if suite["form"] != task["form"] or suite["interp"] != task["interp"]:
+        return None
+    if suite["kind"] == "unittest" and task["kind"] != "unittest":
+        return None
+    if suite["kind"] == "pytest" and any(o.split("=", 1)[0] in PYTEST_NARROWING or re.match(r"^-[km]\S", o)
+                                         for o in ini.get("addopts") or []):
+        return None
+    tf = test_files_of(task, files, ini)
+    if not tf:
+        return None
+    if suite["kind"] == "pytest":
+        if not all(pytest_runs(suite, ini, p) for p in tf):
+            return None
+    elif suite["discover"] is not None:
+        if not all(unittest_runs(suite["discover"], p, files) for p in tf):
+            return None
+    elif not set(tf) <= set(test_files_of(suite, files, ini) or []):
+        return None
+    stems = _stems(tf)
+    if any(stems & _id_parts(f) for f in baseline or []):
+        return None
+    return tf
+
+
+def blame_tasks(covered, failures):
+    """[(task id, failing test ids)] for covered earlier tasks whose test files are among the suite's failures."""
+    res = []
+    for tid, tf in covered:
+        stems = _stems(tf)
+        mine = [f for f in failures if stems & _id_parts(f)]
+        if mine:
+            res.append((tid, mine))
+    return res
+
+
 # --------------------------------------------------------------------------- next step / anchor / handoff
 
-def compute_next(st, cfg, live_tree=None):
+def compute_next(st, cfg, live_tree=None, live_fp=None, job=None):
     if st.get("paused"):
         return "Harness paused (`.sci/sci unpause` to resume)."
+    if job:
+        return ("Wait for the running %s: `.sci/sci wait` (repeat until it finishes). Meanwhile read code or use "
+                "note/hyp/now; do not edit files." % (job.get("label") or "sci command"))
     if not st.get("objective"):
         return 'Set the objective: .sci/sci objective "<one-line goal>"'
     tasks = st["tasks"]
@@ -1158,7 +1811,7 @@ def compute_next(st, cfg, live_tree=None):
         vt = t.get("verified_tree")
         if not vt:
             return "Checks pass. Run `.sci/sci verify` (full gate)."
-        if live_tree and live_tree != vt:
+        if live_tree and live_tree != vt and not (live_fp and live_fp == t.get("verified_fp")):
             return "Files changed since the last verify. Run `.sci/sci verify` again."
         if not t.get("verified_full"):
             return "Quick verify passed. Run the full `.sci/sci verify` before `.sci/sci done`."
@@ -1170,7 +1823,7 @@ def compute_next(st, cfg, live_tree=None):
         lv = st.get("last_verify") or {}
         if (lv.get("ok") and not lv.get("quick") and not lv.get("task")
                 and (lv.get("t") or "") >= max(x.get("done_at") or "" for x in tasks)
-                and (live_tree is None or lv.get("tree") in (None, live_tree))):
+                and (live_tree is None or lv.get("tree") in (None, live_tree) or (live_fp and lv.get("fp") == live_fp))):
             return ("All tasks done and the final verify passed. Run `.sci/sci report` and give the human the report, "
                     "including every NEEDS YOUR REVIEW item.")
         return "All tasks done. Run `.sci/sci verify` (final regression), then report to the human with `.sci/sci report`."
@@ -1332,31 +1985,32 @@ def golden_path(repo, name):
 
 
 def golden_check_one(store, name, label_prefix="golden"):
-    repo, st, cfg = store.repo, store.st, store.cfg
-    meta = st["goldens"].get(name)
+    """Run golden `name` and compare its numbers. Returns (ok, lines, record for goldens[name]["last"], seconds);
+    the caller stores the record (it runs without the state lock)."""
+    repo, cfg = store.repo, store.cfg
     try:
         with open(str(golden_path(repo, name)), encoding="utf-8") as f:
             ref = json.load(f)
     except (OSError, ValueError):
-        return False, ["FAIL %s %s: reference file .sci/golden/%s.json is missing or corrupt" % (label_prefix, name, name)]
+        return False, ["FAIL %s %s: reference file .sci/golden/%s.json is missing or corrupt" % (
+            label_prefix, name, name)], {"ok": False, "t": now_iso()}, 0.0
     r = run_cmd(store, ref["cmd"], "golden-" + name, None, int(ref.get("timeout") or cfg["verify_timeout"]))
     if not r.ok:
-        out = report_run(repo, cfg, r, "%s %s (command failed)" % (label_prefix, name))
-        meta["last"] = {"ok": False, "t": now_iso()}
-        return False, out
+        return (False, report_run(repo, cfg, r, "%s %s (command failed)" % (label_prefix, name)),
+                {"ok": False, "t": now_iso()}, r.secs)
     vals = parse_numbers(r.lines[1:], ref.get("filter"))
     refv = [float(v) for v in ref["values"]]
     ok, msg, bad = compare_numbers(refv, vals, float(ref["rtol"]), float(ref["atol"]))
-    meta["last"] = {"ok": ok, "t": now_iso(), "msg": msg}
+    last = {"ok": ok, "t": now_iso(), "msg": msg}
     if ok:
         return True, ["PASS %s %s: %d numbers within rtol=%g atol=%g" % (label_prefix, name, len(refv),
-                                                                        float(ref["rtol"]), float(ref["atol"]))]
+                                                                        float(ref["rtol"]), float(ref["atol"]))], last, r.secs
     out = ["FAIL %s %s: %s | log %s" % (label_prefix, name, msg, repo.rel(r.log))]
     for i in bad[:8]:
         out.append("  value #%d: reference %r, now %r" % (i, refv[i], vals[i]))
     out.append("  If this change of numbers is intended (better scheme, bug fix), justify it: "
                ".sci/sci golden update %s --reason \"...\"" % name)
-    return False, out
+    return False, out, last, r.secs
 
 
 # --------------------------------------------------------------------------- toolchain detection
@@ -1515,6 +2169,413 @@ def def_patterns(sym):
         re.compile(r"^\s*#\s*define\s+%s\b" % s),
         re.compile(r"^[A-Za-z_][\w:<>,\s\*&]*?\b%s\s*\([^;]*$" % s),
     ]
+
+
+# --------------------------------------------------------------------------- background jobs
+#
+# check, verify, run, baseline and golden add/update/check run in a detached worker process. The command that
+# started the worker relays its output for up to `wait_secs` seconds and then returns, so neither a shell-tool
+# timeout nor a session restart can kill a long verify, and `.sci/sci wait` picks the output up again later.
+
+JOB = {}  # set in the worker: {"n", "repo", "data", "lock"}
+JOB_RUNNING = 3  # exit code of a command whose background job is still running
+
+
+def jobs_dir(repo):
+    return repo.dir / "jobs"
+
+
+def job_path(repo, n, ext="json"):
+    return jobs_dir(repo) / ("%d.%s" % (n, ext))
+
+
+def read_job(repo, n):
+    try:
+        with open(str(job_path(repo, n)), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def write_job(repo, n, data):
+    with contextlib.suppress(OSError):
+        atomic_write(job_path(repo, n), json.dumps(data), sync=False)
+
+
+def job_numbers(repo):
+    try:
+        return sorted(int(p.stem) for p in jobs_dir(repo).glob("*.json") if p.stem.isdigit())
+    except OSError:
+        return []
+
+
+def job_update(**kw):
+    """Record the progress of this worker's job (no-op outside a worker)."""
+    if not JOB:
+        return
+    with JOB["lock"]:
+        JOB["data"].update(kw)
+        write_job(JOB["repo"], JOB["n"], JOB["data"])
+
+
+def job_step(label, i, n, est):
+    job_update(step=label, step_i=i, step_n=n, step_t=time.time(), step_est=est)
+
+
+def run_lock_busy(repo):
+    """True while another process holds the run lock."""
+    p = repo.dir / ".run.lock"
+    if _RUN_LOCK_HELD or not p.exists():
+        return False
+    with file_lock(p, wait=0) as held:
+        return not held
+
+
+def job_alive(repo, j):
+    if not j or j.get("state") == "done":
+        return False
+    if j.get("state") == "starting":
+        return time.time() - float(j.get("t0") or 0) < 30
+    return run_lock_busy(repo)
+
+
+def running_job(repo):
+    """The background job that is still running (never this worker's own), else None."""
+    for n in reversed(job_numbers(repo)[-6:]):
+        if JOB and JOB["n"] == n:
+            continue
+        j = read_job(repo, n)
+        if job_alive(repo, j):
+            return j
+    return None
+
+
+def starting_job(repo):
+    """An earlier background job whose worker has not taken the run lock yet: it goes first."""
+    for n in job_numbers(repo)[-6:]:
+        if JOB and n >= JOB["n"]:
+            continue
+        j = read_job(repo, n)
+        if j and j.get("state") == "starting" and time.time() - float(j.get("t0") or 0) < 30:
+            return j
+    return None
+
+
+def mark_stale_jobs(repo):
+    """Called with the run lock held: any other unfinished job lost its process."""
+    for n in job_numbers(repo)[-6:]:
+        j = read_job(repo, n)
+        if j and j.get("state") == "running" and not (JOB and JOB["n"] == n):
+            j.update(state="done", rc=1, interrupted=True)
+            write_job(repo, n, j)
+
+
+def job_progress(j):
+    now = time.time()
+    s = "job %s, %s so far" % (j.get("n"), fmt_secs(now - float(j.get("t0") or now)))
+    if j.get("step"):
+        k = "%s/%s " % (j.get("step_i"), j.get("step_n")) if (j.get("step_n") or 0) > 1 else ""
+        s += "; now %s%s for %s" % (k, j["step"], fmt_secs(now - float(j.get("step_t") or now)))
+        if j.get("step_est"):
+            s += ", it took %s last time" % fmt_secs(j["step_est"])
+    return s
+
+
+def busy_text(repo):
+    j = running_job(repo)
+    if j:
+        return ("%s is still running (%s)." % (j.get("label") or "A sci command", job_progress(j)),
+                "Wait for it: `.sci/sci wait` (repeat until it finishes). Meanwhile read code or use note/hyp/now; "
+                "do not edit files. To stop it: `.sci/sci cancel`.")
+    return "Another sci command (check, verify, run, ...) is running in this repo.", "Wait for it to finish, then retry."
+
+
+def detach_kwargs(breakaway=False):
+    if os.name == "posix":
+        return {"start_new_session": True}
+    flags = 0x00000200 | 0x08000000  # CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW (children keep a hidden console)
+    return {"creationflags": flags | (0x01000000 if breakaway else 0)}  # CREATE_BREAKAWAY_FROM_JOB
+
+
+def start_job(repo, argv, label):
+    jd = jobs_dir(repo)
+    jd.mkdir(parents=True, exist_ok=True)
+    nums = job_numbers(repo)
+    for old in nums[:-30]:
+        for ext in ("json", "out", "seen"):
+            with contextlib.suppress(OSError):
+                job_path(repo, old, ext).unlink()
+    n = (nums[-1] if nums else 0) + 1
+    while True:
+        try:
+            fd = os.open(str(job_path(repo, n)), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError:
+            n += 1
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump({"n": n, "argv": argv, "label": label, "state": "starting", "t": now_iso(), "t0": time.time()}, f)
+    open(str(job_path(repo, n, "out")), "wb").close()
+    try:
+        p = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "_spawn", str(n)] + argv,
+                             cwd=os.getcwd(), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, **detach_kwargs())
+        if p.wait(timeout=60) != 0:
+            raise OSError("the worker did not start (exit %s)" % p.returncode)
+    except (OSError, subprocess.SubprocessError):
+        write_job(repo, n, {"n": n, "argv": argv, "label": label, "state": "done", "rc": 1, "t0": time.time()})
+        raise
+    return n
+
+
+def spawn_worker(n, argv):
+    """Runs in a short-lived middle process, so the worker is not a child of the command that waits for it: a shell
+    tool that kills that command's process tree on a timeout cannot reach the worker."""
+    repo = Repo(find_root())
+    args = [sys.executable, str(Path(__file__).resolve()), "_job", str(n)] + argv
+    with open(str(job_path(repo, n, "out")), "ab") as f:
+        kw = dict(cwd=os.getcwd(), stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT)
+        try:
+            subprocess.Popen(args, **dict(kw, **detach_kwargs(breakaway=True)))
+        except OSError:
+            if os.name == "posix":
+                raise
+            subprocess.Popen(args, **dict(kw, **detach_kwargs()))  # the job object does not allow breakaway
+    return 0
+
+
+def _raise_interrupt(signum, frame):
+    raise KeyboardInterrupt
+
+
+def job_worker(n, argv):
+    repo = Repo(find_root())
+    JOB.update({"n": n, "repo": repo, "lock": threading.Lock(), "data": read_job(repo, n) or {"n": n, "t0": time.time()}})
+    for s in (sys.stdout, sys.stderr):
+        with contextlib.suppress(AttributeError, ValueError, OSError):
+            s.reconfigure(line_buffering=True)
+    if os.name == "posix":
+        signal.signal(signal.SIGTERM, _raise_interrupt)  # `.sci/sci cancel`: stop the command, then exit
+    stop = threading.Event()
+
+    def beat():
+        while not stop.wait(5):
+            job_update(beat=time.time())
+    threading.Thread(target=beat, daemon=True).start()
+    rc = 1
+    try:
+        rc = dispatch(argv)
+    finally:
+        stop.set()
+        for s in (sys.stdout, sys.stderr):
+            with contextlib.suppress(Exception):
+                s.flush()
+        job_update(state="done", rc=rc, ended=time.time())
+    return rc
+
+
+def job_label(repo, args):
+    try:
+        tid = (json.loads(read_text(repo.dir / "state.json") or "{}") or {}).get("active")
+    except ValueError:
+        tid = None
+    c = command_name(args)
+    if c == "run":
+        return "run " + trunc(" ".join(args.command), 60)
+    if c == "golden":
+        return " ".join(["golden", args.action] + list(args.names or []))
+    return c + (" " + tid if tid and c in ("check", "verify") else "")
+
+
+def wait_done(repo, n, secs):
+    end = time.time() + secs
+    while time.time() < end:
+        if (read_job(repo, n) or {}).get("state") == "done" and not run_lock_busy(repo):
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def cancel_job(repo, n):
+    j = read_job(repo, n) or {}
+    pids = [int(x) for x in (j.get("pid"), j.get("child")) if x]
+    if os.name == "posix":
+        if j.get("pid"):
+            with contextlib.suppress(OSError):
+                os.killpg(int(j["pid"]), signal.SIGTERM)  # the worker stops its command and exits
+        if not wait_done(repo, n, 10):
+            for pid in pids:  # the worker and its command each lead their own process group
+                with contextlib.suppress(OSError):
+                    os.killpg(pid, signal.SIGKILL)
+    else:
+        for pid in pids:
+            with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=30)
+    wait_done(repo, n, 5)
+    j = read_job(repo, n) or j
+    if j.get("state") != "done":
+        j.update(state="done", rc=130, cancelled=True)
+        write_job(repo, n, j)
+
+
+def job_seen(repo, n):
+    try:
+        return json.loads(read_text(job_path(repo, n, "seen")) or "{}")
+    except ValueError:
+        return {}
+
+
+def job_interrupted(repo, n, j, left_at):
+    j = dict(j, state="done", rc=1, interrupted=True)
+    write_job(repo, n, j)
+    print("INTERRUPTED: background job %d (%s) stopped before it finished: its process is gone (killed, or the "
+          "machine slept or restarted)." % (n, j.get("label") or "?"))
+    print("Run the command again. Steps that already passed on these files are reused.")
+    beat = float(j.get("beat") or j.get("t0") or 0)
+    if left_at and beat and beat - float(left_at) < 20:
+        print("It died right after the command that started it returned, so this environment probably ends "
+              "background processes. Run sci in the foreground: `.sci/sci config set background false` (and give "
+              "your shell tool a long timeout).")
+    return 1
+
+
+def follow_job(repo, n, secs):
+    """Relay a job's output until it finishes (exit with its code) or `secs` pass (exit JOB_RUNNING)."""
+    out_p, seen_p = job_path(repo, n, "out"), job_path(repo, n, "seen")
+    seen = job_seen(repo, n)
+    cur = {"pos": int(seen.get("pos") or 0), "buf": b""}
+    deadline = time.time() + max(secs, 0)
+
+    def pull(final=False):
+        try:
+            with open(str(out_p), "rb") as f:
+                f.seek(cur["pos"])
+                data = f.read()
+        except OSError:
+            data = b""
+        cur["pos"] += len(data)
+        lines = (cur["buf"] + data).split(b"\n")
+        cur["buf"] = b"" if final else lines.pop()
+        if final and lines and not lines[-1]:
+            lines.pop()
+        for ln in lines:
+            print(ln.decode("utf-8", "replace").rstrip("\r"), flush=True)
+        with contextlib.suppress(OSError):
+            atomic_write(seen_p, json.dumps({"pos": cur["pos"] - len(cur["buf"]), "until": time.time()}), sync=False)
+
+    delay, gone = 0.05, None
+    try:
+        while True:
+            pull()
+            j = read_job(repo, n) or {}
+            if j.get("state") == "done":
+                pull(final=True)
+                return int(j["rc"]) if isinstance(j.get("rc"), int) else 1
+            if job_alive(repo, j):
+                gone = None
+            elif gone is None:
+                gone = time.time()
+            elif time.time() - gone > 3:
+                pull(final=True)
+                return job_interrupted(repo, n, j, seen.get("until"))
+            if time.time() >= deadline:
+                print("... still running: %s (%s)" % (j.get("label") or "job %d" % n, job_progress(j)))
+                print("STILL RUNNING in the background. It finishes and records its result even if this session ends. "
+                      "Meanwhile you can read code and use note/hyp/now. Do not edit files until it finishes.")
+                print("[sci] NEXT: `.sci/sci wait` for the result (repeat until it finishes), or `.sci/sci cancel`.")
+                return JOB_RUNNING
+            time.sleep(delay)
+            delay = min(delay * 1.5, 0.5)
+    except KeyboardInterrupt:
+        cancel_job(repo, n)
+        print("Interrupted: stopped background job %d." % n)
+        return 130
+
+
+def job_state_lines(repo):
+    """resume/status lines about a running or interrupted background job."""
+    live = running_job(repo)
+    if live:
+        return ["RUNNING: %s (%s). `.sci/sci wait` shows its output; its result is saved when it finishes."
+                % (live.get("label"), job_progress(live))], live
+    nums = job_numbers(repo)
+    j = read_job(repo, nums[-1]) if nums else None
+    if j and j.get("state") != "done" and not job_alive(repo, j):
+        j.update(state="done", rc=1, interrupted=True)
+        write_job(repo, nums[-1], j)
+    if j and j.get("interrupted") and time.time() - float(j.get("t0") or 0) < 86400:
+        return ["INTERRUPTED: background job %d (%s) stopped before it finished. Run it again; steps that passed on "
+                "these files are reused." % (nums[-1], j.get("label"))], None
+    return [], None
+
+
+def cmd_wait(args):
+    repo = Repo(find_root())
+    nums = job_numbers(repo)
+    live = running_job(repo)
+    n = int(str(args.job).lstrip("#")) if args.job else (live["n"] if live else (nums[-1] if nums else None))
+    j = read_job(repo, n) if n is not None else None
+    if not j:
+        print("No background job has run in this repo yet.")
+        return 0
+    if j.get("state") == "done" and int(job_seen(repo, n).get("pos") or 0) >= os.path.getsize(
+            str(job_path(repo, n, "out"))):
+        rc = int(j["rc"]) if isinstance(j.get("rc"), int) else 1
+        print("Job %d (%s) already finished (exit %d) and its output was shown. Its last lines:" % (
+            n, j.get("label") or "?", rc))
+        lines = read_log_lines(job_path(repo, n, "out"))
+        while lines and not lines[-1].strip():
+            lines.pop()
+        for ln in lines[-30:]:
+            print(ln)
+        return rc
+    bg = background_cfg()
+    return follow_job(repo, n, args.secs if args.secs is not None else (bg[1] if bg else DEFAULT_CONFIG["wait_secs"]))
+
+
+def cmd_cancel(args):
+    repo = Repo(find_root())
+    j = running_job(repo)
+    if not j:
+        print("No background job is running.")
+        return 0
+    cancel_job(repo, j["n"])
+    print("Stopped job %d (%s). Its partial output: .sci/sci wait %d" % (j["n"], j.get("label") or "?", j["n"]))
+    return 0
+
+
+def background_cfg():
+    """(enabled, wait_secs) from this repo's sci config, or None when sci is not set up here."""
+    try:
+        root = find_root()
+    except Refuse:
+        return None
+    try:
+        cfg = json.loads(read_text(root / SD / "config.json") or "null")
+    except ValueError:
+        cfg = None
+    if not isinstance(cfg, dict) or not (root / SD / "state.json").exists():
+        return None
+    env = os.environ.get("SCI_BACKGROUND", "").strip().lower()
+    on = cfg.get("background", True) if not env else env not in ("0", "false", "no", "off")
+    try:
+        secs = int(cfg.get("wait_secs") or DEFAULT_CONFIG["wait_secs"])
+    except (TypeError, ValueError):
+        secs = DEFAULT_CONFIG["wait_secs"]
+    return bool(on), secs
+
+
+def run_in_background(argv, args, wait_default):
+    repo = Repo(find_root())
+    if run_lock_busy(repo) or running_job(repo):
+        refuse(*busy_text(repo))
+    try:
+        n = start_job(repo, argv, job_label(repo, args))
+    except (OSError, subprocess.SubprocessError) as e:
+        print("note: could not start a background worker (%s); running in the foreground." % e)
+        with run_lock(repo):
+            return int(args.fn(args) or 0)
+    return follow_job(repo, n, args.wait if getattr(args, "wait", None) is not None else wait_default)
 
 
 # --------------------------------------------------------------------------- commands
@@ -1704,7 +2765,7 @@ def cmd_init(args):
     br = git(repo.root, ["rev-parse", "--abbrev-ref", "HEAD"], check=False).stdout.strip()
     if br in ("main", "master"):
         print("  note: you are on %s. Unless the human said otherwise, work on a branch: git switch -c sci/<topic>" % br)
-    dirty = dirty_tracked(repo) if head_sha(repo) else []
+    dirty = dirty_tracked(repo, cfg) if head_sha(repo) else []
     if dirty:
         print("  WARNING: %d files have uncommitted changes from before sci (%s). Ask the human to commit or stash "
               "them before you start tasks." % (len(dirty), ", ".join(dirty[:5])))
@@ -1715,19 +2776,24 @@ def cmd_init(args):
 
 def cmd_resume(args):
     store = load_store()
-    repo, st, cfg = store.repo, store.st, store.cfg
-    t = active_task(st)
+    repo = store.repo
     live_tree = None
     with state_lock(repo, required=False) as held:
+        st, cfg = store.load()
+        t = active_task(st)
         if st["tasks"] and not args.brief:
             live_tree = snapshot(repo, cfg)[0]
         if held and not args.brief:
             st["session"] = int(st.get("session") or 0) + 1
             store.log("RESUME", task=st.get("active"), msg="session %d" % st["session"])
             store.save(live_tree)
-        st["next"] = compute_next(st, cfg, live_tree)
+    job_lines, live = job_state_lines(repo)
+    live_fp = None
+    if live_tree and t and t.get("verified_fp") and t.get("verified_tree") not in (None, live_tree):
+        live_fp = code_fp(store, live_tree)
+    st["next"] = compute_next(st, cfg, live_tree, live_fp, live)
     if not held:
-        print("note: another sci command is running (for example a long verify); showing the saved state.")
+        print("note: another sci command is saving its state; showing the last saved state.")
     if args.brief:
         print(anchor_block(st))
         return 0
@@ -1763,7 +2829,9 @@ def cmd_resume(args):
         L.append("  locked: " + lock_desc(t))
         lv = "never"
         if t.get("verified_tree"):
-            lv = "on current files" if live_tree == t["verified_tree"] else "STALE (files changed since)"
+            lv = ("on current files" if live_tree == t["verified_tree"] else
+                  "on current code (only docs changed since)" if live_fp and live_fp == t.get("verified_fp") else
+                  "STALE (files changed since)")
         L.append("  last check: %s | strikes %d/3 | verify: %s" % (check_state(t), t.get("strikes", 0), lv))
         if t.get("last_check") and not t["last_check"].get("ok") and t["last_check"].get("failing"):
             L.append("  failing: " + ", ".join(t["last_check"]["failing"][:6]))
@@ -1799,6 +2867,7 @@ def cmd_resume(args):
         L.append("GUARD: " + " | ".join(trunc(fmt_viol(v), 140) for v in st["violations"][:3]))
     if st.get("paused"):
         L.append("PAUSED: the harness is paused.")
+    L += job_lines
     L.append("NEXT: " + st["next"])
     out([x for x in L if x is not None])
     return 0
@@ -1806,8 +2875,7 @@ def cmd_resume(args):
 
 def cmd_objective(args):
     store = load_store()
-    st = store.st
-    with state_lock(store.repo):
+    with locked(store) as (st, _):
         if st.get("objective") and st["objective"] != args.text:
             st["objective_history"].append({"t": now_iso(), "text": st["objective"]})
         st["objective"] = args.text
@@ -1837,7 +2905,7 @@ def cmd_task_add(args):
         for x in re.split(r"[,\s]+", d):
             if x:
                 deps.append(need_task(st, x)["id"])
-    with state_lock(store.repo):
+    with locked(store) as (st, cfg):
         tid = "T%d" % st["next_task"]
         st["next_task"] += 1
         t = {"id": tid, "title": title.strip(), "verify": args.verify.strip(), "scope": split_scope(args.scope),
@@ -1898,25 +2966,25 @@ def cmd_task_show(args):
 
 def cmd_task_start(args):
     store = load_store()
-    repo, st, cfg = store.repo, store.st, store.cfg
-    cur = active_task(st)
-    t = need_task(st, args.id) if args.id else (cur or next_eligible(st))
-    if t is None:
-        refuse("No eligible task to start.", ".sci/sci task list  (add tasks with .sci/sci task add, or unblock one)")
-    if cur and cur["id"] != t["id"]:
-        refuse("%s is already active. One task at a time." % cur["id"],
-               "Finish it (.sci/sci verify, then .sci/sci done -m ...) or park it: .sci/sci task block %s --reason \"...\"" % cur["id"])
-    if cur and cur["id"] == t["id"]:
-        out(task_card(t))
-        print("Already active.")
-        footer(store)
-        return 0
-    if t["status"] == "done":
-        refuse("%s is already done." % t["id"], ".sci/sci task list")
-    missing = [d for d in t["deps"] if find_task(st, d)["status"] != "done"]
-    if missing:
-        refuse("%s depends on unfinished %s." % (t["id"], ", ".join(missing)), "Start %s first." % missing[0])
-    with state_lock(repo):
+    repo = store.repo
+    with locked(store) as (st, cfg):
+        cur = active_task(st)
+        t = need_task(st, args.id) if args.id else (cur or next_eligible(st))
+        if t is None:
+            refuse("No eligible task to start.", ".sci/sci task list  (add tasks with .sci/sci task add, or unblock one)")
+        if cur and cur["id"] != t["id"]:
+            refuse("%s is already active. One task at a time." % cur["id"],
+                   "Finish it (.sci/sci verify, then .sci/sci done -m ...) or park it: .sci/sci task block %s --reason \"...\"" % cur["id"])
+        if cur and cur["id"] == t["id"]:
+            out(task_card(t))
+            print("Already active.")
+            footer(store)
+            return 0
+        if t["status"] == "done":
+            refuse("%s is already done." % t["id"], ".sci/sci task list")
+        missing = [d for d in t["deps"] if find_task(st, d)["status"] != "done"]
+        if missing:
+            refuse("%s depends on unfinished %s." % (t["id"], ", ".join(missing)), "Start %s first." % missing[0])
         tree, big = snapshot(repo, cfg)
         if t["status"] == "blocked":
             store.log("TASK_UNBLOCK", task=t["id"], msg="started")
@@ -1927,7 +2995,7 @@ def cmd_task_start(args):
         st["active"] = t["id"]
         st["violations"] = []
         set_ref(repo, t["id"] + "/start", tree, "sci %s start" % t["id"])
-        dirty = dirty_tracked(repo) if head_sha(repo) else []
+        dirty = dirty_tracked(repo, cfg) if head_sha(repo) else []
         t["preexisting_dirty"] = dirty
         store.log("TASK_START", task=t["id"], msg=t["title"], tree=tree)
         store.save()
@@ -1963,11 +3031,11 @@ def save_attempt_patch(repo, t, a, b, label):
 
 def cmd_task_block(args):
     store = load_store()
-    repo, st, cfg = store.repo, store.st, store.cfg
-    t = need_task(st, args.id) if args.id else require_active(st)
-    if t["status"] == "done":
-        refuse("%s is done; nothing to block." % t["id"])
-    with state_lock(repo):
+    repo = store.repo
+    with locked(store) as (st, cfg):
+        t = need_task(st, args.id) if args.id else require_active(st)
+        if t["status"] == "done":
+            refuse("%s is done; nothing to block." % t["id"])
         if st.get("active") == t["id"]:
             tree, _ = snapshot(repo, cfg)
             p = save_attempt_patch(repo, t, t["start_tree"], tree, "parked-%d" % int(time.time()))
@@ -1986,11 +3054,10 @@ def cmd_task_block(args):
 
 def cmd_task_unblock(args):
     store = load_store()
-    st = store.st
-    t = need_task(st, args.id)
-    if t["status"] != "blocked":
-        refuse("%s is not blocked." % t["id"])
-    with state_lock(store.repo):
+    with locked(store) as (st, _):
+        t = need_task(st, args.id)
+        if t["status"] != "blocked":
+            refuse("%s is not blocked." % t["id"])
         t["status"] = "todo"
         if args.answer:
             st["notes"].append({"id": st["next_note"], "t": now_iso(), "kind": "decision", "task": t["id"],
@@ -2005,12 +3072,11 @@ def cmd_task_unblock(args):
 
 def cmd_task_amend(args):
     store = load_store()
-    st = store.st
-    t = need_task(st, args.id)
     if not args.reason or len(args.reason.strip()) < 4:
-        refuse("Amending a task needs --reason.", ".sci/sci task amend %s ... --reason \"<why>\"" % t["id"])
+        refuse("Amending a task needs --reason.", ".sci/sci task amend %s ... --reason \"<why>\"" % args.id)
     changes = []
-    with state_lock(store.repo):
+    with locked(store) as (st, _):
+        t = need_task(st, args.id)
         if args.title:
             changes.append("title")
             t["title"] = args.title
@@ -2059,9 +3125,8 @@ def split_scope(items):
 
 def cmd_task_scope(args):
     store = load_store()
-    st = store.st
-    t = require_active(st)
-    with state_lock(store.repo):
+    with locked(store) as (st, _):
+        t = require_active(st)
         added = [s for s in split_scope(args.globs) if s not in t["scope"]]
         t["scope"] += added
         store.log("TASK_SCOPE", task=t["id"], msg=", ".join(added))
@@ -2151,10 +3216,10 @@ def lock_candidates(repo, cfg, t, cur_tree):
 
 def cmd_lock(args):
     store = load_store()
-    repo, st, cfg = store.repo, store.st, store.cfg
-    t = require_active(st)
+    repo = store.repo
     none_reason = None
-    with state_lock(repo):
+    with locked(store) as (st, cfg):
+        t = require_active(st)
         if args.none:
             if len(args.none.strip()) < 10:
                 refuse("`--none` needs a real reason (it is shown to the human).",
@@ -2205,12 +3270,12 @@ def cmd_lock(args):
 
 def cmd_unlock(args):
     store = load_store()
-    repo, st = store.repo, store.st
+    repo = store.repo
     if not args.reason or len(args.reason.strip()) < 10:
         refuse("Unlocking needs a real --reason (it is shown to the human).",
                ".sci/sci unlock <file> --reason \"<why the test itself is wrong>\"")
-    t = active_task(st)
-    with state_lock(repo):
+    with locked(store) as (st, _):
+        t = active_task(st)
         paths = [norm_rel(repo.root, p) for p in args.paths] if args.paths else (sorted(t["locked"]) if t else [])
         if not paths:
             refuse("Nothing to unlock.", ".sci/sci unlock <file> --reason \"...\"")
@@ -2242,21 +3307,22 @@ def store_protected_copy(repo, src, sha):
         shutil.copyfile(str(src), str(dst))
 
 
-def maybe_build(store, cur_tree, quiet=False):
+def build_needed(store, cur_tree):
+    """The build command if compiled sources changed since the last successful build, else None."""
     repo, st, cfg = store.repo, store.st, store.cfg
     cmd = (cfg.get("build_cmd") or "").strip()
-    if not cmd:
-        return True, []
     last = st.get("last_build_tree")
-    if last and last != cur_tree:
-        if not any(match_any(p, cfg.get("build_globs")) for _, p in tree_changes(repo, last, cur_tree)):
-            return True, []
-    elif last == cur_tree:
-        return True, []
-    r = run_cmd(store, cmd, "build", st.get("active"), int(cfg["verify_timeout"]))
-    if r.ok:
-        st["last_build_tree"] = cur_tree
-    return r.ok, report_run(repo, cfg, r, "build", quiet_pass=True)
+    if not cmd or last == cur_tree:
+        return None
+    if last and not any(match_any(p, cfg.get("build_globs")) for _, p in tree_changes(repo, last, cur_tree)):
+        return None
+    return cmd
+
+
+def run_build(store, cmd):
+    job_step("build", 0, 0, (store.st.get("durations") or {}).get("build:" + cmd))
+    r = run_cmd(store, cmd, "build", store.st.get("active"), int(store.cfg["verify_timeout"]))
+    return r, report_run(store.repo, store.cfg, r, "build", quiet_pass=True)
 
 
 def record_attempt(store, t, ok, tree, run):
@@ -2305,42 +3371,79 @@ def scope_warnings(store, t, cur_tree):
         w.append("DIFF LARGE: %d changed lines in %d files. Small steps are safer; consider splitting the task or "
                  "`.sci/sci restore` and redoing it smaller." % (total, len(ns)))
     if t["scope"]:
-        outside = [p for p in ns if not is_test(p, cfg) and not match_any(p, t["scope"])]
+        outside = [p for p in ns if not is_test(p, cfg) and not match_any(p, t["scope"]) and not is_doc(p, cfg)]
         if outside:
             w.append("OUT OF SCOPE: %s. Revert unless needed (`.sci/sci restore --paths <file>`); if truly needed, "
                      "`.sci/sci task scope <glob>`." % ", ".join(outside[:6]))
     return w
 
 
+def edited_during(repo, cfg, tree):
+    """Code that existed when a command started and was edited or deleted while it ran: tracked files and untracked
+    source files. New files, documentation and untracked data files (output the command rewrites) do not count."""
+    after, _ = snapshot(repo, cfg)
+    if after == tree:
+        return []
+    tracked = tracked_set(repo)
+    return [p for s, p in tree_changes(repo, tree, after) if s != "A" and not is_doc(p, cfg)
+            and (p in tracked or SRC_EXT_RE.search(p))]
+
+
+def edited_text(what, paths):
+    return ("FILES EDITED WHILE %s RAN: %s. Its result does not count. Run it again and do not edit files until it "
+            "finishes. (If the command itself rewrites them: `.sci/sci config add ignore_globs <glob>`.)"
+            % (what, ", ".join(paths[:6])))
+
+
 def cmd_check(args):
     store = load_store()
-    repo, st, cfg = store.repo, store.st, store.cfg
-    t = require_active(st)
-    cmd = args.cmd or t["verify"]
+    repo = store.repo
     with state_lock(repo):
+        st, cfg = store.load()
+        t = require_active(st)
+        tid, cmd = t["id"], args.cmd or t["verify"]
         cur_tree, big = snapshot(repo, cfg)
-        ok_b, blines = maybe_build(store, cur_tree)
-        lines = list(blines)
-        if not ok_b:
-            lines.append("Build failed; fix the build first.")
-            r = None
-            ok = False
-        else:
-            r = run_cmd(store, cmd, "check", t["id"], int(cfg["check_timeout"]))
-            ok = r.ok
-            lines += report_run(repo, cfg, r, "check " + t["id"])
+        fp, cmd_fp = code_fp(store, cur_tree), step_fp(store, cur_tree, cmd)
+        env = env_stamp(repo.root, cmd)
         viol = run_guard(repo, st, cfg, t, cur_tree)
+        build = build_needed(store, cur_tree)
+    # The command runs without the state lock, so note/hyp/now keep working meanwhile.
+    lines, r, built, ok_b, ref = [], None, None, True, cur_tree
+    if build:
+        built, blines = run_build(store, build)
+        ok_b = built.ok
+        lines += blines
+        ref = snapshot(repo, cfg)[0]  # what the build writes is not an edit
+    if not ok_b:
+        lines.append("Build failed; fix the build first.")
+    else:
+        job_step("check " + tid, 1, 1, (st.get("durations") or {}).get("cmd:" + cmd))
+        r = run_cmd(store, cmd, "check", tid, int(cfg["check_timeout"]))
+        lines += report_run(repo, cfg, r, "check " + tid)
+    edited = edited_during(repo, cfg, ref) if r is not None else []
+    with state_lock(repo):
+        st, cfg = store.load()
+        t = need_task(st, tid)
+        if built is not None:
+            note_result(st, "build:" + build, None, built.ok, built.secs)
+            if built.ok:
+                st["last_build_tree"] = cur_tree
+        if r is not None and not edited:
+            note_result(st, "cmd:" + cmd, cmd_fp, r.ok, r.secs, env)
         st["violations"] = viol
-        if viol and ok:
+        ok = bool(r is not None and r.ok) and not viol and not edited
+        if viol and r is not None and r.ok:
             lines.append("CHECK COUNTS AS FAIL: the tests pass, but protected/locked tests were changed (see GUARD).")
-        ok = ok and not viol
-        lines += record_attempt(store, t, ok, cur_tree, r)
+        if edited:
+            lines.append(edited_text("THE CHECK", edited))
+        else:
+            lines += record_attempt(store, t, ok, cur_tree, r)
         warn = scope_warnings(store, t, cur_tree)
-        store.log("CHECK", task=t["id"], msg="PASS" if ok else "FAIL", run=r.n if r else None, cmd=cmd,
+        store.log("CHECK", task=tid, msg="PASS" if ok else "FAIL", run=r.n if r else None, cmd=cmd,
                   strikes=t["strikes"])
-        store.save(cur_tree)
+        store.save(cur_tree, fp)
     if t.get("stop"):
-        print("!!! STOP is active for %s (details at the end of this output)." % t["id"])
+        print("!!! STOP is active for %s (details at the end of this output)." % tid)
     out(lines)
     for v in viol:
         print("GUARD: " + fmt_viol(v))
@@ -2356,87 +3459,170 @@ def cmd_check(args):
     return 0 if ok else 1
 
 
+def verify_plan(store, t, tree, args):
+    """Steps of a verify, in order, each marked with a reusable PASS if one exists; plus the earlier tasks whose
+    tests the regression suite runs anyway (they get no separate step)."""
+    st, cfg = store.st, store.cfg
+    steps, covered = [], []
+    if t:
+        steps.append({"label": "task " + t["id"], "kind": "task", "cmd": t["verify"], "key": "cmd:" + t["verify"],
+                      "tid": t["id"]})
+    if not args.quick:
+        suite_cmd = (cfg.get("regress_cmd") or "").strip()
+        suite = parse_test_cmd(suite_cmd) if suite_cmd else None
+        files = tree_entries(store.repo, tree) if suite else {}
+        ini = pytest_ini(store.repo.root) if suite and suite["kind"] == "pytest" else {}
+        known = (st.get("baseline") or {}).get("failures") or []
+        seen = set(s["cmd"] for s in steps)
+        for d in st["tasks"]:
+            if d["status"] != "done" or not d.get("verify") or d["verify"] in seen:
+                continue
+            seen.add(d["verify"])
+            tf = suite_covers(suite, d["verify"], files, ini, known) if suite else None
+            if tf:
+                covered.append((d["id"], tf))
+            else:
+                steps.append({"label": "regression " + d["id"], "kind": "done", "cmd": d["verify"],
+                              "key": "cmd:" + d["verify"], "tid": d["id"]})
+        for name in sorted(st["goldens"]):
+            ref = read_text(golden_path(store.repo, name)) or ""
+            steps.append({"label": "golden " + name, "kind": "golden", "name": name,
+                          "cmd": st["goldens"][name].get("cmd") or "", "key": "golden:%s|%s" % (name, sha256_text(ref)[:16])})
+        if suite_cmd:
+            steps.append({"label": "regression suite", "kind": "suite", "cmd": suite_cmd,
+                          "key": "suite:%s|%s" % (suite_cmd, sha256_text(json.dumps(sorted(known)))[:12])})
+    durs = st.get("durations") or {}
+    for s in steps:
+        s["est"] = durs.get(s["key"]) or (durs.get("baseline:" + s["cmd"]) if s["kind"] == "suite" else None)
+        s["fp"], s["env"] = step_fp(store, tree, s["cmd"]), env_stamp(store.repo.root, s["cmd"])
+        s["cached"] = (None if args.fresh or not cacheable(s["cmd"])
+                       else cached_pass(st, s["key"], s["fp"], s["env"]))
+    return steps, covered
+
+
+def judge_suite(store, r, covered):
+    """(ok, lines) for a regression-suite run: known baseline failures pass, new ones fail and are traced back to
+    the earlier task whose tests they are."""
+    repo, st, cfg = store.repo, store.st, store.cfg
+    if r.ok:
+        return True, report_run(repo, cfg, r, "regression suite", quiet_pass=True)[:1]
+    known = set((st.get("baseline") or {}).get("failures") or [])
+    new = [f for f in r.failing if f not in known]
+    if r.failing and not new and st.get("baseline") and not r.timed_out:
+        return True, ["PASS regression suite: only the %d known pre-existing failures (baseline) | log %s"
+                      % (len(r.failing), repo.rel(r.log))]
+    lines = report_run(repo, cfg, r, "regression suite")
+    if new:
+        lines.append("NEW FAILURES (not in baseline): " + ", ".join(new[:12]))
+        for tid, fails in blame_tasks(covered, new):
+            lines.append("REGRESSION: your change broke %s's tests (%s). Fix the code; do not edit %s's tests."
+                         % (tid, ", ".join(fails[:4]), tid))
+    elif not st.get("baseline"):
+        lines.append("No baseline recorded. If these failures existed before your work, record them "
+                     "on a clean checkout with `.sci/sci baseline` (ask the human if unsure).")
+    else:
+        lines.append("Could not attribute the failure to known baseline tests; treat it as yours.")
+    return False, lines
+
+
 def cmd_verify(args):
     store = load_store()
-    repo, st, cfg = store.repo, store.st, store.cfg
-    t = active_task(st)
-    lines, ok, failed_golden = [], True, None
+    repo = store.repo
     with state_lock(repo):
+        st, cfg = store.load()
+        t = active_task(st)
+        tid = t["id"] if t else None
+        spec0 = spec_hash(t) if t else None
         cur_tree, big = snapshot(repo, cfg)
+        fp = code_fp(store, cur_tree)
         viol = run_guard(repo, st, cfg, t, cur_tree)
-        st["violations"] = viol
-        if viol:
+        build = build_needed(store, cur_tree)
+        steps, covered = verify_plan(store, t, cur_tree, args)
+
+    # Steps run without the state lock and print as they finish (a background job relays them live).
+    def say(ls):
+        for ln in ls:
+            print(ln, flush=True)
+
+    ok, failed_golden, results, glast, built, ref = not viol, None, [], {}, None, cur_tree
+    if viol:
+        say(["FAIL guard: " + fmt_viol(v) for v in viol] + ["GUARD FIX: " + guard_fix_hint(viol)])
+    if ok and build:
+        built, blines = run_build(store, build)
+        ok = built.ok
+        say(blines)
+        ref = snapshot(repo, cfg)[0]
+    if ok and covered:
+        say(["note: the regression suite runs the tests of %s, so their checks do not run separately."
+             % ", ".join(c[0] for c in covered)])
+    for i, s in enumerate(steps if ok else [], 1):
+        if s["cached"]:
+            say(["PASS %s: reused (passed on identical code %s)" % (s["label"], ago(s["cached"].get("t")))])
+            continue
+        job_step(s["label"], i, len(steps), s["est"])
+        if s["kind"] == "golden":
+            s_ok, glines, glast[s["name"]], secs = golden_check_one(store, s["name"])
+            say(glines)
+            failed_golden = None if s_ok else s["name"]
+        else:
+            r = run_cmd(store, s["cmd"], "regress" if s["kind"] == "suite" else "verify", tid,
+                        int(cfg["verify_timeout"]))
+            secs = r.secs
+            if s["kind"] == "suite":
+                s_ok, slines = judge_suite(store, r, covered)
+                say(slines)
+            elif r.ok:
+                s_ok = True
+                say(report_run(repo, cfg, r, s["label"], quiet_pass=True)[:1])
+            else:
+                s_ok = False
+                say(report_run(repo, cfg, r, s["label"]))
+                if s["kind"] == "done":
+                    say(["REGRESSION: your change broke %s's check. Fix the code; do not edit %s's tests."
+                         % (s["tid"], s["tid"])])
+        results.append((s, s_ok, secs))
+        if not s_ok:
             ok = False
-            lines += ["FAIL guard: " + fmt_viol(v) for v in viol] + ["GUARD FIX: " + guard_fix_hint(viol)]
-        if ok:
-            ok_b, blines = maybe_build(store, cur_tree)
-            lines += blines
-            ok = ok_b
-        steps = []
-        if t:
-            steps.append(("task " + t["id"], t["verify"]))
-        if not args.quick:
-            seen = set(c for _, c in steps)
-            for d in st["tasks"]:
-                if d["status"] == "done" and d.get("verify") and d["verify"] not in seen:
-                    seen.add(d["verify"])
-                    steps.append(("regression " + d["id"], d["verify"]))
-        for label, cmd in steps if ok else []:
-            r = run_cmd(store, cmd, "verify", t["id"] if t else None, int(cfg["verify_timeout"]))
-            if r.ok:
-                lines += report_run(repo, cfg, r, label, quiet_pass=True)[:1]
-            else:
-                ok = False
-                lines += report_run(repo, cfg, r, label)
-                if label.startswith("regression"):
-                    lines.append("REGRESSION: your change broke %s's check. Fix the code; do not edit %s's tests."
-                                 % (label.split()[1], label.split()[1]))
-                break
-        if ok and not args.quick:
-            for name in sorted(st["goldens"]):
-                g_ok, glines = golden_check_one(store, name)
-                lines += glines
-                if not g_ok:
-                    ok, failed_golden = False, name
-                    break
-        if ok and not args.quick and cfg.get("regress_cmd"):
-            r = run_cmd(store, cfg["regress_cmd"], "regress", t["id"] if t else None, int(cfg["verify_timeout"]))
-            if r.ok:
-                lines += report_run(repo, cfg, r, "regression suite", quiet_pass=True)[:1]
-            else:
-                known = set((st.get("baseline") or {}).get("failures") or [])
-                new = [f for f in r.failing if f not in known]
-                if r.failing and not new and st.get("baseline") and not r.timed_out:
-                    lines.append("PASS regression suite: only the %d known pre-existing failures (baseline) | log %s"
-                                 % (len(r.failing), repo.rel(r.log)))
-                else:
-                    ok = False
-                    lines += report_run(repo, cfg, r, "regression suite")
-                    if new:
-                        lines.append("NEW FAILURES (not in baseline): " + ", ".join(new[:12]))
-                    elif not st.get("baseline"):
-                        lines.append("No baseline recorded. If these failures existed before your work, record them "
-                                     "on a clean checkout with `.sci/sci baseline` (ask the human if unsure).")
-                    else:
-                        lines.append("Could not attribute the failure to known baseline tests; treat it as yours.")
+            break
+    edited = edited_during(repo, cfg, ref) if results else []
+    lines = []
+    with state_lock(repo):
+        st, cfg = store.load()
+        t = find_task(st, tid) if tid else None
+        if built is not None:
+            note_result(st, "build:" + build, None, built.ok, built.secs)
+            if built.ok:
+                st["last_build_tree"] = cur_tree
+        for s, s_ok, secs in results if not edited else []:
+            note_result(st, s["key"], s["fp"], s_ok, secs, s["env"])
+        for name, last in glast.items():
+            if name in st["goldens"] and not edited:
+                st["goldens"][name]["last"] = last
+        if edited:
+            ok = False
+            lines.append(edited_text("VERIFY", edited))
+        if t and spec_hash(t) != spec0:
+            ok = False
+            lines.append("%s's verify command changed while verify ran. Run `.sci/sci verify` again." % tid)
+        st["violations"] = viol
         if t:
             if ok:
-                t["verified_tree"] = cur_tree
-                t["verified_full"] = not args.quick
-                t["verified_at"] = now_iso()
+                t.update({"verified_tree": cur_tree, "verified_fp": fp, "verified_full": not args.quick,
+                          "verified_at": now_iso()})
                 lc = t.get("last_check")
                 if not lc or lc.get("tree") != cur_tree or not lc.get("ok"):
                     record_attempt(store, t, True, cur_tree, None)
             else:
                 t["verified_tree"] = None
-                lines += record_attempt(store, t, False, cur_tree, None) if not viol else []
-                if failed_golden:
+                lines += record_attempt(store, t, False, cur_tree, None) if not viol and not edited else []
+                if failed_golden and not edited:
                     t["last_check"]["golden"] = failed_golden
-        st["last_verify"] = {"t": now_iso(), "ok": ok, "task": t["id"] if t else None, "quick": bool(args.quick),
-                             "tree": cur_tree}
-        store.log("VERIFY", task=t["id"] if t else None, msg="PASS" if ok else "FAIL", quick=bool(args.quick))
+        st["last_verify"] = {"t": now_iso(), "ok": ok, "task": tid, "quick": bool(args.quick), "tree": cur_tree,
+                             "fp": fp}
+        store.log("VERIFY", task=tid, msg="PASS" if ok else "FAIL", quick=bool(args.quick),
+                  reused=len([s for s in steps if s["cached"]]), covered=[c[0] for c in covered])
         warn = scope_warnings(store, t, cur_tree) if t else []
-        store.save(cur_tree)
+        store.save(cur_tree, fp)
     out(lines)
     for w in warn:
         print("WARNING: " + w)
@@ -2459,11 +3645,12 @@ PRINT_RE = re.compile(r"^\s*(?:print\(|console\.log\(|println!\(|fmt\.Print|std:
 
 def cmd_done(args):
     store = load_store()
-    repo, st, cfg = store.repo, store.st, store.cfg
-    t = require_active(st)
-    with state_lock(repo):
+    repo = store.repo
+    with locked(store) as (st, cfg):
+        t = require_active(st)
         cur_tree, big = snapshot(repo, cfg)
-        if t.get("verified_tree") != cur_tree:
+        doc_only = verified_docs_since(store, t, cur_tree)
+        if doc_only is None:
             refuse("%s is not verified on the current files." % t["id"],
                    "Run `.sci/sci verify` (it must PASS on exactly these files), then `.sci/sci done -m \"...\"`.")
         if not t.get("verified_full"):
@@ -2481,10 +3668,14 @@ def cmd_done(args):
             refuse("Untracked files created during %s are not in its scope: %s" % (t["id"], ", ".join(junk[:10])),
                    "Delete them, move scratch work into .sci/scratch/, or include them: .sci/sci done -m \"...\" --add <file>")
         outside = [p for s, p in changes if t["scope"] and not is_test(p, cfg) and not match_any(p, t["scope"])
-                   and p not in added_list]
+                   and p not in added_list and not (s != "A" and is_doc(p, cfg))]
         if outside and not args.allow_outside:
             refuse("Changes outside %s's scope: %s" % (t["id"], ", ".join(outside[:10])),
                    "Revert them (`.sci/sci restore --paths <file>`), or justify: .sci/sci done -m \"...\" --allow-outside \"<why>\"")
+        notes = []
+        if doc_only:
+            notes.append("Only documentation changed since verify (%s); the verification still holds."
+                         % ", ".join(doc_only[:5]))
         dbg, prints = [], []
         for s, p in changes:
             if s == "D":
@@ -2497,7 +3688,6 @@ def cmd_done(args):
                         prints.append(p)
         if dbg:
             refuse("Debugger statements left in the change: " + "; ".join(dbg[:5]), "Remove them, then .sci/sci verify.")
-        notes = []
         if args.allow_outside and outside:
             add_review(st, t["id"], "outside-scope", "%s: %s" % (", ".join(outside), args.allow_outside))
         if args.no_lock and not is_locked(t):
@@ -2586,9 +3776,9 @@ def locked_targets(st, t):
 
 def cmd_restore(args):
     store = load_store()
-    repo, st, cfg = store.repo, store.st, store.cfg
-    t = require_active(st)
-    with state_lock(repo):
+    repo = store.repo
+    with locked(store) as (st, cfg):
+        t = require_active(st)
         to = args.to or ("green" if t.get("last_green_tree") else "start")
         target = t.get("last_green_tree") if to == "green" else t.get("start_tree")
         if to == "green" and not target:
@@ -2658,6 +3848,7 @@ def cmd_run(args):
     store = load_store()
     repo, st, cfg = store.repo, store.st, store.cfg
     t = active_task(st)
+    tid = t["id"] if t else None
     cmd = " ".join(args.command).strip()
     if not cmd:
         refuse("Nothing to run.", '.sci/sci run "python3 .sci/scratch/probe.py"')
@@ -2665,9 +3856,13 @@ def cmd_run(args):
     old = os.environ.get("PYTHONPATH")
     os.environ["PYTHONPATH"] = os.pathsep.join(extra + ([old] if old else []))
     try:
+        job_step("run", 1, 1, (st.get("durations") or {}).get("run:" + cmd))
+        r = run_cmd(store, cmd, "run", tid, int(args.timeout or cfg["check_timeout"]))
         with state_lock(repo):
-            r = run_cmd(store, cmd, "run", t["id"] if t else None, int(args.timeout or cfg["check_timeout"]))
-            store.log("RUN", task=t["id"] if t else None, msg=cmd, run=r.n, rc=r.rc)
+            st, cfg = store.load()
+            t = find_task(st, tid) if tid else None
+            note_result(st, "run:" + cmd, None, r.ok, r.secs)
+            store.log("RUN", task=tid, msg=cmd, run=r.n, rc=r.rc)
             msg = None
             if t and t.get("stop"):
                 t["stop"]["runs"] = int(t["stop"].get("runs") or 0) + 1
@@ -2722,12 +3917,11 @@ def maybe_clear_stop(store, t):
 
 def cmd_hyp(args):
     store = load_store()
-    st = store.st
-    t = active_task(st)
     action = args.action
     rest = args.rest or []
     msg = None
-    with state_lock(store.repo):
+    with locked(store) as (st, _):
+        t = active_task(st)
         if action == "add":
             text = " ".join(rest).strip()
             if not text:
@@ -2751,6 +3945,19 @@ def cmd_hyp(args):
             h = next((x for x in st["hyps"] if x["id"] == hid), None)
             if h is None:
                 refuse("No hypothesis %s." % hid, ".sci/sci hyp list")
+            if t and h.get("task") and h["task"] != t["id"]:
+                mine = [x["id"] for x in st["hyps"] if x.get("task") == t["id"] and x["status"] == "open"]
+                refuse("%s belongs to %s, not to the active task %s. Check the ID." % (hid, h["task"], t["id"]),
+                       "Open hypotheses of %s: %s" % (t["id"], ", ".join(mine)) if mine else
+                       ".sci/sci hyp add \"<cause>\" adds one for %s" % t["id"])
+            if h["status"] != "open" and not args.revise:
+                refuse("%s is already %s (evidence: %s). Check the ID: .sci/sci hyp list" % (
+                    hid, h["status"], trunc(h.get("evidence", ""), 120)),
+                       "Only to change the verdict on new evidence: .sci/sci hyp %s %s \"<evidence>\" --revise"
+                       % (action, hid))
+            if h["status"] != "open":
+                h.setdefault("history", []).append({"status": h["status"], "evidence": h.get("evidence", ""),
+                                                    "t": h.get("resolved")})
             h["status"] = "refuted" if action == "refute" else "confirmed"
             h["evidence"] = ev
             h["resolved"] = now_iso()
@@ -2776,9 +3983,8 @@ def cmd_hyp(args):
 
 def cmd_note(args):
     store = load_store()
-    st = store.st
-    t = active_task(st)
-    with state_lock(store.repo):
+    with locked(store) as (st, _):
+        t = active_task(st)
         if args.list:
             for n in st["notes"]:
                 if not n.get("dropped") or args.all:
@@ -2814,12 +4020,11 @@ def cmd_note(args):
 
 def cmd_now(args):
     store = load_store()
-    st = store.st
-    t = active_task(st)
     text = " ".join(args.text or []).strip()
     if not text:
         refuse("Empty.", '.sci/sci now "<what you are doing and the next command you will run>"')
-    with state_lock(store.repo):
+    with locked(store) as (st, _):
+        t = active_task(st)
         st["now"] = {"t": now_iso(), "task": t["id"] if t else None, "text": text}
         store.log("NOW", task=t["id"] if t else None, msg=text)
         store.save()
@@ -2834,79 +4039,88 @@ def cmd_golden(args):
     store = load_store()
     repo, st, cfg = store.repo, store.st, store.cfg
     a = args.action
-    rc = 0
-    with state_lock(repo):
-        if a == "list":
-            if not st["goldens"]:
-                print("No goldens. Add one: .sci/sci golden add <name> --cmd \"<command that prints key numbers>\"")
-            for name, g in sorted(st["goldens"].items()):
-                last = g.get("last") or {}
-                print("%s: n=%d rtol=%g atol=%g | last: %s" % (name, g.get("n", 0), g["rtol"], g["atol"],
-                                                              ("OK " if last.get("ok") else "FAIL ") + ago(last.get("t"))
-                                                              if last else "never"))
+    if a == "list":
+        if not st["goldens"]:
+            print("No goldens. Add one: .sci/sci golden add <name> --cmd \"<command that prints key numbers>\"")
+        for name, g in sorted(st["goldens"].items()):
+            last = g.get("last") or {}
+            print("%s: n=%d rtol=%g atol=%g | last: %s" % (name, g.get("n", 0), g["rtol"], g["atol"],
+                                                          ("OK " if last.get("ok") else "FAIL ") + ago(last.get("t"))
+                                                          if last else "never"))
+        return 0
+    if a == "check":
+        names = args.names or sorted(st["goldens"])
+        if not names:
+            print("No goldens defined.")
             return 0
-        if a == "check":
-            names = args.names or sorted(st["goldens"])
-            if not names:
-                print("No goldens defined.")
-                return 0
-            allok = True
-            for name in names:
-                if name not in st["goldens"]:
-                    refuse("No golden %s." % name, ".sci/sci golden list")
-                ok, lines = golden_check_one(store, name)
-                out(lines)
-                allok = allok and ok
+        for name in names:
+            if name not in st["goldens"]:
+                refuse("No golden %s." % name, ".sci/sci golden list")
+        allok, lasts = True, {}
+        for i, name in enumerate(names, 1):
+            job_step("golden " + name, i, len(names), None)
+            ok, lines, lasts[name], _ = golden_check_one(store, name)
+            out(lines)
+            allok = allok and ok
+        with state_lock(repo):
+            st, cfg = store.load()
+            for name, last in lasts.items():
+                if name in st["goldens"]:
+                    st["goldens"][name]["last"] = last
             store.log("GOLDEN_CHECK", msg="PASS" if allok else "FAIL", names=names)
             store.save()
-            footer(store)
-            return 0 if allok else 1
-        if not args.names:
-            refuse("Missing golden name.", ".sci/sci golden %s <name> ..." % a)
-        name = args.names[0]
-        if not GOLD_NAME_RE.match(name):
-            refuse("Bad golden name %r (letters, digits, _ . - only)." % name)
-        if a in ("add", "update"):
-            if a == "add" and name in st["goldens"]:
-                refuse("Golden %s exists." % name, "To re-record (flagged for review): .sci/sci golden update %s --reason \"...\"" % name)
-            if a == "update" and name not in st["goldens"]:
-                refuse("No golden %s." % name, ".sci/sci golden add %s --cmd \"...\"" % name)
-            if a == "update" and (not args.reason or len(args.reason) < 10):
-                refuse("Re-recording a golden needs --reason (shown to the human).")
-            old = {}
-            if a == "update":
-                with contextlib.suppress(OSError, ValueError):
-                    old = json.loads(read_text(golden_path(repo, name)) or "{}")
-            cmd = args.cmd or old.get("cmd")
-            if not cmd:
-                refuse("Missing --cmd.", ".sci/sci golden add %s --cmd \"python examples/run.py --steps 50\"" % name)
-            rtol = args.rtol if args.rtol is not None else float(old.get("rtol", 1e-12))
-            atol = args.atol if args.atol is not None else float(old.get("atol", 0.0))
-            filt = args.filter if args.filter is not None else old.get("filter")
-            if filt:
-                try:
-                    re.compile(filt)
-                except re.error as e:
-                    refuse("Bad --filter regex: %s" % e)
-            r = run_cmd(store, cmd, "golden-" + name, None, int(args.timeout or cfg["verify_timeout"]))
-            if not r.ok:
-                out(report_run(repo, cfg, r, "golden %s" % a))
-                refuse("The golden command failed; nothing recorded.")
-            vals = parse_numbers(r.lines[1:], filt)
-            if not vals:
-                refuse("The command printed no numbers%s." % (" matching --filter" if filt else ""),
-                       "Print the key outputs (energies, norms, residuals) one per line.")
-            r2 = run_cmd(store, cmd, "golden-" + name, None, int(args.timeout or cfg["verify_timeout"]))
-            vals2 = parse_numbers(r2.lines[1:], filt) if r2.ok else []
-            det_ok, det_msg, _ = compare_numbers(vals, vals2, rtol, atol)
-            if not det_ok:
-                refuse("Output is not reproducible run-to-run within rtol=%g atol=%g (%s)." % (rtol, atol, det_msg),
-                       "Fix seeds/threads, filter out timings with --filter, or choose a tolerance justified by a "
-                       "script (see references/scientific-verification.md).")
-            dirty = bool(head_sha(repo) and dirty_tracked(repo))
-            rec = {"name": name, "cmd": cmd, "rtol": rtol, "atol": atol, "filter": filt, "values": [repr(v) for v in vals],
-                   "n": len(vals), "recorded_at": now_iso(), "head": head_sha(repo), "dirty_tree": dirty,
-                   "timeout": args.timeout}
+        footer(store)
+        return 0 if allok else 1
+    if not args.names:
+        refuse("Missing golden name.", ".sci/sci golden %s <name> ..." % a)
+    name = args.names[0]
+    if not GOLD_NAME_RE.match(name):
+        refuse("Bad golden name %r (letters, digits, _ . - only)." % name)
+    if a in ("add", "update"):
+        if a == "add" and name in st["goldens"]:
+            refuse("Golden %s exists." % name, "To re-record (flagged for review): .sci/sci golden update %s --reason \"...\"" % name)
+        if a == "update" and name not in st["goldens"]:
+            refuse("No golden %s." % name, ".sci/sci golden add %s --cmd \"...\"" % name)
+        if a == "update" and (not args.reason or len(args.reason) < 10):
+            refuse("Re-recording a golden needs --reason (shown to the human).")
+        old = {}
+        if a == "update":
+            with contextlib.suppress(OSError, ValueError):
+                old = json.loads(read_text(golden_path(repo, name)) or "{}")
+        cmd = args.cmd or old.get("cmd")
+        if not cmd:
+            refuse("Missing --cmd.", ".sci/sci golden add %s --cmd \"python examples/run.py --steps 50\"" % name)
+        rtol = args.rtol if args.rtol is not None else float(old.get("rtol", 1e-12))
+        atol = args.atol if args.atol is not None else float(old.get("atol", 0.0))
+        filt = args.filter if args.filter is not None else old.get("filter")
+        if filt:
+            try:
+                re.compile(filt)
+            except re.error as e:
+                refuse("Bad --filter regex: %s" % e)
+        job_step("golden %s %s" % (a, name), 1, 2, None)
+        r = run_cmd(store, cmd, "golden-" + name, None, int(args.timeout or cfg["verify_timeout"]))
+        if not r.ok:
+            out(report_run(repo, cfg, r, "golden %s" % a))
+            refuse("The golden command failed; nothing recorded.")
+        vals = parse_numbers(r.lines[1:], filt)
+        if not vals:
+            refuse("The command printed no numbers%s." % (" matching --filter" if filt else ""),
+                   "Print the key outputs (energies, norms, residuals) one per line.")
+        job_step("golden %s %s (repeat)" % (a, name), 2, 2, None)
+        r2 = run_cmd(store, cmd, "golden-" + name, None, int(args.timeout or cfg["verify_timeout"]))
+        vals2 = parse_numbers(r2.lines[1:], filt) if r2.ok else []
+        det_ok, det_msg, _ = compare_numbers(vals, vals2, rtol, atol)
+        if not det_ok:
+            refuse("Output is not reproducible run-to-run within rtol=%g atol=%g (%s)." % (rtol, atol, det_msg),
+                   "Fix seeds/threads, filter out timings with --filter, or choose a tolerance justified by a "
+                   "script (see references/scientific-verification.md).")
+        dirty = bool(head_sha(repo) and dirty_tracked(repo, cfg))
+        with state_lock(repo):
+            st, cfg = store.load()
+            rec = {"name": name, "cmd": cmd, "rtol": rtol, "atol": atol, "filter": filt,
+                   "values": [repr(v) for v in vals], "n": len(vals), "recorded_at": now_iso(), "head": head_sha(repo),
+                   "dirty_tree": dirty, "timeout": args.timeout}
             atomic_write(golden_path(repo, name), json.dumps(rec, indent=1))
             st["goldens"][name] = {"rtol": rtol, "atol": atol, "n": len(vals), "cmd": cmd,
                                    "last": {"ok": True, "t": now_iso()}}
@@ -2914,16 +4128,20 @@ def cmd_golden(args):
                 add_review(st, st.get("active"), "golden-update", "%s re-recorded: %s" % (name, args.reason))
             store.log("GOLDEN_" + a.upper(), task=st.get("active"), msg=name, n=len(vals), reason=args.reason or "")
             store.save()
-            print("Golden %s %s: %d numbers, rtol=%g atol=%g (reproducible across 2 runs)." % (
-                name, "recorded" if a == "add" else "re-recorded", len(vals), rtol, atol))
-            zeros = sum(1 for v in vals if v == 0.0)
-            if zeros and atol == 0.0:
-                print("  note: %d of the numbers are exactly 0, and with atol=0 any round-off there (1e-17) fails. If "
-                      "round-off is expected, record again with an --atol on the scale of the other numbers." % zeros)
-            if dirty and a == "add":
-                print("  note: recorded with uncommitted changes in the tree. Goldens should capture known-good "
-                      "behavior (usually recorded before you change numerical code).")
-        elif a == "retol":
+        print("Golden %s %s: %d numbers, rtol=%g atol=%g (reproducible across 2 runs)." % (
+            name, "recorded" if a == "add" else "re-recorded", len(vals), rtol, atol))
+        zeros = sum(1 for v in vals if v == 0.0)
+        if zeros and atol == 0.0:
+            print("  note: %d of the numbers are exactly 0, and with atol=0 any round-off there (1e-17) fails. If "
+                  "round-off is expected, record again with an --atol on the scale of the other numbers." % zeros)
+        if dirty and a == "add":
+            print("  note: recorded with uncommitted changes in the tree. Goldens should capture known-good "
+                  "behavior (usually recorded before you change numerical code).")
+        footer(store)
+        return 0
+    with state_lock(repo):
+        st, cfg = store.load()
+        if a == "retol":
             if name not in st["goldens"]:
                 refuse("No golden %s." % name)
             if not args.reason or len(args.reason) < 10:
@@ -2958,7 +4176,7 @@ def cmd_golden(args):
         else:
             refuse("Unknown golden action %s." % a)
     footer(store)
-    return rc
+    return 0
 
 
 def cmd_order(args):
@@ -3104,11 +4322,14 @@ def cmd_baseline(args):
     cmd = args.cmd or cfg.get("regress_cmd") or cfg.get("test_cmd")
     if not cmd:
         refuse("No command to run.", ".sci/sci config set regress_cmd \"<suite cmd>\"  (or pass --cmd)")
+    if active_task(st) and not args.force:
+        refuse("A task is active; a baseline must describe the code before your changes.",
+               "Record it between tasks, or pass --force if the active task has no changes yet.")
+    job_step("baseline", 1, 1, (st.get("durations") or {}).get("baseline:" + cmd))
+    r = run_cmd(store, cmd, "baseline", None, int(cfg["verify_timeout"]))
     with state_lock(repo):
-        if active_task(st) and not args.force:
-            refuse("A task is active; a baseline must describe the code before your changes.",
-                   "Record it between tasks, or pass --force if the active task has no changes yet.")
-        r = run_cmd(store, cmd, "baseline", None, int(cfg["verify_timeout"]))
+        st, cfg = store.load()
+        note_result(st, "baseline:" + cmd, None, r.ok, r.secs)
         st["baseline"] = {"t": now_iso(), "cmd": cmd, "rc": r.rc, "failures": r.failing, "head": head_sha(repo)}
         enrolled = args.cmd or not cfg.get("regress_cmd")
         if enrolled:
@@ -3135,6 +4356,19 @@ def cmd_baseline(args):
 def cmd_config(args):
     store = load_store()
     cfg = store.cfg
+    if args.action in ("add", "remove"):
+        if not isinstance(DEFAULT_CONFIG.get(args.key), list):
+            refuse("%s is not a list setting." % args.key, "List settings: " + ", ".join(
+                sorted(k for k, v in DEFAULT_CONFIG.items() if isinstance(v, list))))
+        items = split_scope([" ".join(args.value)])
+        with locked(store) as (_, cfg):
+            cur = list(cfg.get(args.key) or [])
+            new = cur + [x for x in items if x not in cur] if args.action == "add" else [x for x in cur if x not in items]
+            cfg[args.key] = new
+            store.log("CONFIG", msg="%s %s %s" % (args.key, args.action, ", ".join(items)))
+            store.save()
+        print("%s = %s" % (args.key, json.dumps(new)))
+        return 0
     if args.action == "set":
         if args.key not in DEFAULT_CONFIG:
             refuse("Unknown config key %s." % args.key, "Keys: " + ", ".join(sorted(DEFAULT_CONFIG)))
@@ -3155,7 +4389,7 @@ def cmd_config(args):
                 val = [x.strip() for x in raw.split(",") if x.strip()]
         else:
             val = raw
-        with state_lock(store.repo):
+        with locked(store) as (_, cfg):
             cfg[args.key] = val
             store.log("CONFIG", msg="%s=%s" % (args.key, val))
             store.save()
@@ -3176,7 +4410,7 @@ def cmd_review(args):
         if not args.yes:
             refuse("HUMAN ONLY: clearing review items hides them from the human (a human adds --yes).",
                    "Do not clear them. Leave them for the human to read in `.sci/sci report`.")
-        with state_lock(store.repo):
+        with locked(store) as (st, _):
             n = len(st["review"])
             st["review"] = []
             store.log("REVIEW_CLEAR", msg="%d items" % n)
@@ -3236,8 +4470,8 @@ def cmd_log(args):
 
 def cmd_pause(args, value=True):
     store = load_store()
-    with state_lock(store.repo):
-        store.st["paused"] = value
+    with locked(store) as (st, _):
+        st["paused"] = value
         store.log("PAUSE" if value else "UNPAUSE")
         store.save()
     print("sci %s." % ("paused (hooks stay quiet)" if value else "resumed"))
@@ -3276,20 +4510,26 @@ UNDERSTAND
 WORK
   check [--cmd "narrower cmd"]    run the active task's verify command (fast loop; counts strikes)
   lock [FILES] | lock --none "why"   lock the acceptance tests (after RED); --none: task has no test file
-  verify [--quick]                full gate: task + every done task + goldens + regression suite
+  verify [--quick] [--fresh]      full gate: task + earlier tasks + goldens + regression suite. Reuses a step
+                                  that passed on identical code (docs no test reads do not count); --fresh reruns
+                                  all. An earlier task's tests that the suite runs anyway run only there
+  wait [JOB] [--secs N]           output of the background check/verify/run (they return after wait_secs
+                                  with STILL RUNNING; their result is saved when they finish) | cancel
   done -m "summary" [--add FILE]... [--allow-outside "why"] [--no-lock "why"] [--no-commit]
   restore [--to green|start] [--paths P]...    undo safely (current version saved as a patch first)
   unlock [FILES] --reason "..."   only when a test itself is wrong (flagged for human review)
 DEBUG (required after STOP)
   run "cmd"                       run an experiment from the repo root (PYTHONPATH includes the repo), logged
   hyp add "cause" [--test "cmd"] | hyp refute H1 "evidence" | hyp confirm H1 "evidence" | hyp list [--all]
+                                  (--revise changes the verdict of an already resolved hypothesis)
 SCIENCE
   golden add NAME --cmd "cmd that prints key numbers" [--rtol 1e-12] [--atol 0] [--filter REGEX]
   golden check [NAME] | golden list | golden update NAME --reason ".." | golden retol NAME --rtol X --reason ".."
   order --h H1 H2 H3 --err E1 E2 E3 [--expect P]   (or --n N1 N2 N3) observed convergence order
 INSPECT
   out [RUN] [--grep PAT] [--tail N] [--lines A:B]   read a saved log
-  log [-n N] | review | report | baseline [--cmd ..] | config [set KEY VALUE] | pause | unpause
+  log [-n N] | review | report | baseline [--cmd ..] | pause | unpause
+  config [set KEY VALUE | add KEY ITEM | remove KEY ITEM]   e.g. config add ignore_globs "build/**"
 """ % (VERSION, PY_HINT)
 
 
@@ -3369,10 +4609,19 @@ def build_parser():
     s.set_defaults(fn=cmd_unlock)
     s = sub.add_parser("check")
     s.add_argument("--cmd")
+    s.add_argument("--wait", type=int, metavar="SECS")
     s.set_defaults(fn=cmd_check)
     s = sub.add_parser("verify")
     s.add_argument("--quick", action="store_true")
+    s.add_argument("--fresh", action="store_true")
+    s.add_argument("--wait", type=int, metavar="SECS")
     s.set_defaults(fn=cmd_verify)
+    s = sub.add_parser("wait")
+    s.add_argument("job", nargs="?")
+    s.add_argument("--secs", type=int)
+    s.set_defaults(fn=cmd_wait)
+    s = sub.add_parser("cancel")
+    s.set_defaults(fn=cmd_cancel)
     s = sub.add_parser("done")
     s.add_argument("-m", "--message", required=True)
     s.add_argument("--add", action="append")
@@ -3386,9 +4635,10 @@ def build_parser():
     s.set_defaults(fn=cmd_restore)
 
     s = sub.add_parser("run")
-    s.add_argument("command", nargs=argparse.REMAINDER)
     s.add_argument("--timeout", type=int)
     s.add_argument("--tail", type=int)
+    s.add_argument("--wait", type=int, metavar="SECS")
+    s.add_argument("command", nargs=argparse.REMAINDER)
     s.set_defaults(fn=cmd_run)
     s = sub.add_parser("hyp")
     s.add_argument("action", choices=["add", "refute", "confirm", "list"])
@@ -3396,6 +4646,7 @@ def build_parser():
     s.add_argument("--test")
     s.add_argument("--evidence")
     s.add_argument("--all", action="store_true")
+    s.add_argument("--revise", action="store_true")
     s.set_defaults(fn=cmd_hyp)
     s = sub.add_parser("note")
     s.add_argument("text", nargs="*")
@@ -3417,6 +4668,7 @@ def build_parser():
     s.add_argument("--filter")
     s.add_argument("--timeout", type=int)
     s.add_argument("--reason")
+    s.add_argument("--wait", type=int, metavar="SECS")
     s.set_defaults(fn=cmd_golden)
     s = sub.add_parser("order")
     s.add_argument("--h", type=float, nargs="+")
@@ -3447,9 +4699,10 @@ def build_parser():
     s = sub.add_parser("baseline")
     s.add_argument("--cmd")
     s.add_argument("--force", action="store_true")
+    s.add_argument("--wait", type=int, metavar="SECS")
     s.set_defaults(fn=cmd_baseline)
     s = sub.add_parser("config")
-    s.add_argument("action", nargs="?", choices=["show", "set"], default="show")
+    s.add_argument("action", nargs="?", choices=["show", "set", "add", "remove"], default="show")
     s.add_argument("key", nargs="?")
     s.add_argument("value", nargs="*")
     s.add_argument("--all", action="store_true")
@@ -3473,19 +4726,39 @@ def build_parser():
     return p
 
 
-def main(argv=None):
-    for stream in (sys.stdout, sys.stderr):
-        with contextlib.suppress(AttributeError, ValueError, OSError):
-            stream.reconfigure(encoding="utf-8", errors="replace")  # Windows pipes default to the ANSI code page
-    argv = list(sys.argv[1:] if argv is None else argv)
-    if not argv:
-        argv = ["help"]
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    if getattr(args, "cmd", None) == "config" and args.action == "set" and (not args.key or not args.value):
-        print("REFUSED: usage: .sci/sci config set KEY VALUE")
+def command_name(args):
+    """The subcommand, from its handler (`args.cmd` can be the --cmd option of check/golden/baseline)."""
+    return {cmd_check: "check", cmd_verify: "verify", cmd_run: "run", cmd_baseline: "baseline",
+            cmd_golden: "golden", cmd_done: "done", cmd_restore: "restore", cmd_lock: "lock", cmd_unlock: "unlock",
+            cmd_purge: "purge", cmd_task_start: "task start", cmd_task_block: "task block",
+            cmd_config: "config"}.get(getattr(args, "fn", None), "")
+
+
+def is_runner(args):
+    """Commands that run project commands: they go to a background worker and hold the run lock."""
+    c = command_name(args)
+    return c in ("check", "verify", "run", "baseline") or (c == "golden" and args.action in ("add", "update", "check"))
+
+
+def needs_run_lock(args):
+    return is_runner(args) or command_name(args) in ("done", "restore", "lock", "unlock", "purge", "task start",
+                                                     "task block")
+
+
+def dispatch(argv):
+    args = build_parser().parse_args(argv or ["help"])
+    if command_name(args) == "config" and args.action in ("set", "add", "remove") and (
+            not args.key or not args.value):
+        print("REFUSED: usage: .sci/sci config %s KEY VALUE" % args.action)
         return 2
     try:
+        if is_runner(args) and not JOB:
+            bg = background_cfg()
+            if bg and bg[0]:
+                return run_in_background(argv, args, bg[1])
+        if needs_run_lock(args):
+            with run_lock(Repo(find_root())):
+                return int(args.fn(args) or 0)
         return int(args.fn(args) or 0)
     except Refuse as e:
         print("REFUSED: %s" % e)
@@ -3493,6 +4766,18 @@ def main(argv=None):
     except KeyboardInterrupt:
         print("Interrupted.")
         return 130
+
+
+def main(argv=None):
+    for stream in (sys.stdout, sys.stderr):
+        with contextlib.suppress(AttributeError, ValueError, OSError):
+            stream.reconfigure(encoding="utf-8", errors="replace")  # Windows pipes default to the ANSI code page
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["_spawn"] and len(argv) > 1:
+        return spawn_worker(int(argv[1]), argv[2:])
+    if argv[:1] == ["_job"] and len(argv) > 1:
+        return job_worker(int(argv[1]), argv[2:])
+    return dispatch(argv)
 
 
 if __name__ == "__main__":

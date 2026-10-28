@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.0] - 2026-10-29
+
+Long sessions spent most of their time waiting on `verify`: every test ran twice, nothing was reused, and long
+runs died with the agent's shell-tool timeout.
+
+### Changed
+- `verify` runs each test once. When the regression suite runs an earlier task's test files anyway, that task's
+  check is left to the suite, and a suite failure in those files names the task (`REGRESSION: your change broke
+  T1's tests (...)`). This applies to plain pytest and `python -m unittest` commands with the same interpreter,
+  when the suite doesn't narrow the selection or stop at the first failure and the files have no known baseline
+  failure.
+- `verify` reuses a step that passed on the same code with the same installed packages (`PASS ...: reused`).
+  `verify --fresh` reruns everything; `check` always runs. A document counts as code only for steps that can
+  read it: every step, when a test, source file or build file names it or its extension, or when it lies under
+  a source directory; otherwise only the steps whose command names it, its directory or its extension, or runs
+  a documentation tool. A task that only edits documentation no longer reruns the whole suite.
+- `done` accepts documentation edits made after `verify` when no step of that verify can read them. A modified
+  document no longer counts as being outside the task's scope.
+- check, verify, run, baseline and golden add/update/check run as detached background jobs. The command relays
+  the output for up to `wait_secs` (100) seconds, then prints `STILL RUNNING` and exits with code 3.
+  `.sci/sci wait` collects the result and `.sci/sci cancel` stops the job. A shell-tool timeout or a restarted
+  session no longer kills a long verify, and a job whose process died is reported as `INTERRUPTED`. With
+  `config set background false` (or `SCI_BACKGROUND=0`), everything runs in the foreground as before.
+- note, hyp, now and resume work while a job runs. Commands that run tests or change files are refused. The
+  refusal says how long the job has run and how long its current step took last time.
+- A check or verify whose code files were edited while it ran doesn't count (`FILES EDITED WHILE ... RAN`).
+- Tracked files that match `ignore_globs` keep their committed version in snapshots, so regenerating them no
+  longer changes the snapshot or trips scope checks. `graphify-out/**` is ignored by default.
+- `config add` and `config remove` change one item of a list setting (`config set` replaces the whole list).
+
+### Fixed
+- `hyp confirm|refute` with a mistyped ID could overwrite the verdict of another task's hypothesis or of one
+  already resolved. Both are now refused; `--revise` changes a verdict on new evidence and keeps the old one in
+  the hypothesis's history.
+
 ## [3.1.1] - 2026-10-27
 
 ### Fixed

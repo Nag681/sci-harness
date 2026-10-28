@@ -1,7 +1,9 @@
 # Worked example: a Verlet integrator, start to finish
 
 A real session, recorded with sci 3.0.0. Outputs are real but trimmed: most repeated `[sci] ... NEXT:`
-footer lines are left out, and `...` marks cuts in long test output. The repository is a toy:
+footer lines are left out, and `...` marks cuts in long test output. The `verify` outputs (sections 6 to 8)
+are shown as sci 3.2.0 prints them: a step that already passed on identical code is reused, and an earlier
+task's test runs once, inside the regression suite. The repository is a toy:
 `orbit/integrators.py` has `euler()` and `run()` for the harmonic oscillator x'' = -x. Copy the
 pattern, not the numbers.
 
@@ -232,9 +234,9 @@ PASS check T1: exit 0 in 0.2s | log .sci/runs/0009-check-T1.log
 [sci] T1 "Add velocity Verlet step" | check PASS 0s ago | strikes 0/3 | NEXT: Checks pass. Run `.sci/sci verify` (full gate).
 
 $ .sci/sci verify
-PASS task T1: exit 0 in 0.2s | log .sci/runs/0010-verify-T1.log
+PASS task T1: reused (passed on identical code 1s ago)
 PASS golden euler_energy: 3 numbers within rtol=1e-12 atol=0
-PASS regression suite: exit 0 in 0.2s | log .sci/runs/0012-regress-T1.log
+PASS regression suite: exit 0 in 0.2s | log .sci/runs/0011-regress-T1.log
 VERIFY PASS
 [sci] T1 "Add velocity Verlet step" | check PASS 1s ago | strikes 0/3 | NEXT: Verified. Run `.sci/sci done -m "<summary>"`.
 
@@ -297,13 +299,13 @@ id and the plan written before the compaction. The model appended the Verlet loo
 
 ```
 $ .sci/sci check
-PASS check T2: exit 0 in 0.2s | log .sci/runs/0014-check-T2.log
+PASS check T2: exit 0 in 0.2s | log .sci/runs/0013-check-T2.log
 
 $ .sci/sci verify
-PASS task T2: exit 0 in 0.2s | log .sci/runs/0015-verify-T2.log
-PASS regression T1: exit 0 in 0.2s | log .sci/runs/0016-verify-T2.log
+note: the regression suite runs the tests of T1, so their checks do not run separately.
+PASS task T2: reused (passed on identical code 2s ago)
 PASS golden euler_energy: 3 numbers within rtol=1e-12 atol=0
-PASS regression suite: exit 0 in 0.2s | log .sci/runs/0018-regress-T2.log
+PASS regression suite: exit 0 in 0.2s | log .sci/runs/0015-regress-T2.log
 VERIFY PASS
 
 $ .sci/sci done -m "feat(demo): report Verlet energies"
@@ -314,17 +316,16 @@ DONE T2: Report Verlet energies in energy_demo.py | commit ae77d7c2b8
 [sci] no active task | NEXT: All tasks done. Run `.sci/sci verify` (final regression), then report to the human with `.sci/sci report`.
 ```
 
-`verify` re-ran T1's test as a regression check and confirmed the Euler numbers are unchanged. The
-print note is expected here: printing is the demo's job.
+`verify` ran T1's test again inside the regression suite (once, not twice) and confirmed the Euler numbers
+are unchanged. The print note is expected here: printing is the demo's job.
 
 ## 8. Finish
 
 ```
 $ .sci/sci verify
-PASS regression T1: exit 0 in 0.1s | log .sci/runs/0019-verify.log
-PASS regression T2: exit 0 in 0.2s | log .sci/runs/0020-verify.log
-PASS golden euler_energy: 3 numbers within rtol=1e-12 atol=0
-PASS regression suite: exit 0 in 0.2s | log .sci/runs/0022-regress.log
+note: the regression suite runs the tests of T1, T2, so their checks do not run separately.
+PASS golden euler_energy: reused (passed on identical code 9s ago)
+PASS regression suite: reused (passed on identical code 9s ago)
 VERIFY PASS
 [sci] no active task | NEXT: All tasks done and the final verify passed. Run `.sci/sci report` and give the human the report, including every NEEDS YOUR REVIEW item.
 
@@ -344,7 +345,8 @@ Root causes found:
 - H1: velocity update ignores a(t+dt): should be v + 0.5*dt*(a(t) + a(t+dt)) (run 8: v1 = -0.05 equals the a(t)-only value; Verlet needs -0.09975)
 ```
 
-The final answer to the human is this report, plus anything it lists under NEEDS YOUR REVIEW.
+Nothing changed since T2's verify, so the final verify reused its results (`verify --fresh` reruns them). The
+final answer to the human is this report, plus anything it lists under NEEDS YOUR REVIEW.
 
 ## What to copy
 

@@ -15,7 +15,7 @@ compatibility: >-
   OpenCode, pi, Cursor).
 allowed-tools: Bash Read Write Edit Glob Grep
 metadata:
-  version: "3.1.1"
+  version: "3.2.0"
 ---
 
 # Long-horizon scientific coding
@@ -97,8 +97,16 @@ Run every command from the repository root.
 .sci/sci done -m "<type>: <summary>" # commits only this task's files and shows the next task
 ```
 
+- Long commands: check, verify, run, baseline and golden run in the background. If one prints
+  `STILL RUNNING`, run `.sci/sci wait` (repeat until it finishes); the result is saved even if your
+  session ends. Meanwhile read code or use note/hyp/now, but do not edit files. Never wrap sci in
+  `nohup`, `&`, `timeout` or sleep loops.
+- `verify` reuses steps that passed on identical code and leaves earlier tasks' tests to the
+  regression suite when the suite runs them. After a PASS, editing documentation that no check reads
+  needs no new verify.
 - Experiments and probes: `.sci/sci run "python3 .sci/scratch/probe.py"` (repo on PYTHONPATH,
   output logged as evidence). Keep scratch files in `.sci/scratch/`; they are never committed.
+  Edit code with your file-editing tool, not with scripts.
 - Undo: `.sci/sci restore` (back to the last PASS), `--to start`, or `--paths <file>`.
 - sci runs `--verify`, `--cmd` and `run` commands with bash (Git Bash on Windows): use forward
   slashes and bash quoting in them, even when your own shell is PowerShell.
@@ -117,6 +125,9 @@ Run every command from the repository root.
 | `Untracked files ... not in its scope` | Delete them, move scratch work to `.sci/scratch/`, or add them: `.sci/sci done -m "..." --add <file>`. |
 | `not verified on the current files` | Run `.sci/sci verify` again. |
 | `TIMED OUT` | Check a narrower command: `.sci/sci check --cmd "<single test>"`. |
+| `STILL RUNNING` | `.sci/sci wait` (repeat until it finishes). Do not edit files meanwhile. |
+| `FILES EDITED WHILE ... RAN` | Run the command again and leave files alone until it finishes. |
+| `INTERRUPTED` | Run the command again; steps that passed are reused. If it says your environment ends background processes: `.sci/sci config set background false`. |
 | `REFUSED: ... DO: ...` | Run the command after `DO:`. |
 
 ## 6. Scientific practice

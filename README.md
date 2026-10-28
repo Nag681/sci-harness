@@ -189,8 +189,8 @@ NEXT: Fix the code (not the tests), then `.sci/sci check`. Strike 1/3.
 
 ### 4. T2, and the report
 
-T2 goes through the same loop. Its `verify` also reruns T1's test, so work on the receipt can't quietly break
-the tip math. When every task is done, you get one commit per task and a report:
+T2 goes through the same loop. Its `verify` also runs T1's test again (as part of the whole test suite), so work
+on the receipt can't quietly break the tip math. When every task is done, you get one commit per task and a report:
 
 ```console
 $ git log --oneline
@@ -319,8 +319,9 @@ flowchart TD
 | 🛑 **STOP** | At 3 strikes in a row, the agent must stop editing code. The STOP lifts once the agent has written 2 new guesses (*hypotheses*), run at least one experiment through sci and used it to rule a guess in or out, or when a check passes. |
 | 🚨 **ESCALATE** | If the agent hits 3 strikes again after a STOP (6 failed fixes), it starts the task over a different way or asks you. Every guess it ruled out stays listed, so it never retries a dead end. |
 | 🛡️ **Guard** | Every check and verify confirms four things. The locked test is untouched. Finished tasks' tests are untouched. No test was weakened: no new skip, no deleted assert, no `assert True`, no looser tolerance, no changed expected number. And nobody edited the plan by hand. Breaking any of these counts as a FAIL. |
-| ✅ **Verify** | Runs these in order and stops at the first failure: the guard, then the build (for compiled code), this task's test, every finished task's test, the saved numbers (compared to about 12 digits) and finally the whole test suite (only new failures count). `verify --quick` runs only the first three. |
-| 📦 **Done** | Refuses until the full verify has passed on exactly the current files, the test is locked, nothing outside the task's files has changed, no stray new files are left and no debugger lines remain. A justified exception goes on your review list. Then `done` commits only this task's files as `[T1]`, and its tests become protected for every later task. |
+| ✅ **Verify** | Runs these in order and stops at the first failure: the guard, then the build (for compiled code), this task's test, every finished task's test, the saved numbers (compared to about 12 digits) and finally the whole test suite (only new failures count). No test runs twice: a finished task's test that the suite runs anyway is left to the suite, and a failure there names that task. A step that already passed on the same code with the same installed packages is reused instead of rerun; documentation the step can't read doesn't count as code (`verify --fresh` reruns everything). `verify --quick` runs only the first three. |
+| 📦 **Done** | Refuses until the full verify has passed on exactly the current files, the test is locked, nothing outside the task's files has changed, no stray new files are left and no debugger lines remain. Edits to documentation that no test or check reads are fine on both counts. A justified exception goes on your review list. Then `done` commits only this task's files as `[T1]`, and its tests become protected for every later task. |
+| ⏳ **Long runs** | `check`, `verify`, `run`, `baseline` and `golden` run in the background. If one takes longer than 100 seconds, sci says STILL RUNNING and the agent collects the result with `.sci/sci wait`, so a tool timeout or a restarted session loses nothing. Meanwhile the agent can take notes, but other test runs and edits wait; files edited during a run make its result not count. |
 | ↩️ **Restore** | Undo, back to the last PASS or to the task's start. It saves the current version as a patch first and always puts locked tests back exactly. |
 
 ### How sci picks the next step
@@ -330,6 +331,7 @@ After each step, sci prints a `NEXT:` line. It takes the first row that applies:
 | Situation | `NEXT:` tells the agent to… |
 | --- | --- |
 | the harness is paused | wait (`.sci/sci unpause` resumes) |
+| a check or verify is running in the background | wait for it (`.sci/sci wait`) |
 | no goal yet | set the goal |
 | no tasks yet | explore the code, add 3–12 tasks and record the baseline |
 | STOP is active | write and test guesses (ESCALATE on the second STOP) |
@@ -365,6 +367,7 @@ After each step, sci prints a `NEXT:` line. It takes the first row that applies:
 | `HANDOFF.md` | a readable summary, rewritten after every change |
 | `events.jsonl` | a diary of everything that happened |
 | `runs/` | the full output of every command sci ran |
+| `jobs/` | background runs: their progress and output, for `.sci/sci wait` |
 | `attempts/` | failed and undone attempts, as patches |
 | `golden/` | the saved numbers |
 | `scratch/` | the agent's experiments |
@@ -431,6 +434,20 @@ repository, from GitHub.
 
 When a task is done, sci commits that task's files (turn this off with `.sci/sci config set commit false`). It
 keeps checkpoints under `refs/sci/`, saves your current version as a patch before any undo, and never pushes.
+
+</details>
+
+<details>
+<summary><b>What if the tests take a long time?</b></summary>
+
+sci runs each test once per `verify`: a finished task's test that the whole suite runs anyway isn't run again
+on its own. It also reuses any step that already passed on the same code, so verifying again after a crash
+costs nothing, and a task that only edits documentation reruns only the checks that read those documents.
+
+Long runs continue in the background. After 100 seconds the agent gets `STILL RUNNING` and picks the result up
+with `.sci/sci wait`, so a shell-tool timeout or a restarted session doesn't lose the run. Change the 100 seconds
+with `.sci/sci config set wait_secs 50`. If your agent's environment kills background processes, run everything
+in the foreground with `.sci/sci config set background false` (sci tells the agent when this seems to happen).
 
 </details>
 
