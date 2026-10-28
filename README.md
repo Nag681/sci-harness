@@ -461,8 +461,11 @@ No. It is tuned for small models, but larger ones get the same safety rails on l
 <details>
 <summary><b>How do I update or uninstall?</b></summary>
 
-Run the install command again to update. If you installed the skill under its old name, `software-engineer`,
-updating renames it to `sci`. To remove everything the installer added, run it with `--uninstall` (see
+Run the install command again to update, then restart your agent so it reads the new `SKILL.md`. Each project
+keeps its own copy of the tool in `.sci/`; to update that copy, run
+`python3 ~/.local/share/agent-skills/sci/scripts/sci.py init` in the project (its plan and progress stay).
+`.sci/sci resume` mentions it when a newer version is installed. If you installed the skill under its old name,
+`software-engineer`, updating renames it to `sci`. To remove everything the installer added, run it with `--uninstall` (see
 [install options](#install-options)). Inside a repository, `.sci/sci purge --yes` deletes the harness state.
 
 </details>

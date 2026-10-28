@@ -34,6 +34,8 @@ runs died with the agent's shell-tool timeout.
 - Tracked files that match `ignore_globs` keep their committed version in snapshots, so regenerating them no
   longer changes the snapshot or trips scope checks. `graphify-out/**` is ignored by default.
 - `config add` and `config remove` change one item of a list setting (`config set` replaces the whole list).
+- `resume` says when a newer sci is installed than the project's copy in `.sci/`. Running `init` again updates
+  the copy and keeps the plan.
 
 ### Fixed
 - `hyp confirm|refute` with a mistyped ID could overwrite the verdict of another task's hypothesis or of one

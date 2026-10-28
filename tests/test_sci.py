@@ -1116,6 +1116,18 @@ class TestResumeAndHandoff(unittest.TestCase):
         self.assertIn("use Ralston weights", handoff)
         self.assertIn("positions in metres", handoff)
 
+    def test_resume_notes_a_newer_installed_sci(self):
+        sb = Sandbox(self)
+        sb.init()
+        data = Path(tempfile.mkdtemp(prefix="sci-data-"))
+        self.addCleanup(shutil.rmtree, str(data), True)
+        self.assertNotIn("is installed", sb.ok("resume", env={"XDG_DATA_HOME": str(data)}))
+        inst = data / "agent-skills" / "sci" / "scripts" / "sci.py"
+        inst.parent.mkdir(parents=True)
+        inst.write_text('VERSION = "99.0.0"\n')
+        out = sb.ok("resume", env={"XDG_DATA_HOME": str(data)})
+        self.assertIn("note: sci 99.0.0 is installed; this project still runs %s" % sci.VERSION, out)
+
     def test_handoff_keeps_failed_approaches_across_tasks(self):
         sb = Sandbox(self)
         sb.init()

@@ -2774,6 +2774,21 @@ def cmd_init(args):
     return 0
 
 
+def installed_newer():
+    """(installed version, this version, installed sci.py) when the installed skill is newer than this copy."""
+    src = (Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "agent-skills" / "sci"
+           / "scripts" / "sci.py")
+    try:
+        with open(str(src), encoding="utf-8", errors="replace") as f:
+            m = re.search(r'(?m)^VERSION = "(\d+(?:\.\d+)*)"', f.read(8192))
+        if not m or src.resolve() == Path(__file__).resolve():
+            return None
+    except OSError:
+        return None
+    ver = lambda v: tuple(int(x) for x in v.split("."))  # noqa: E731
+    return (m.group(1), VERSION, str(src)) if ver(m.group(1)) > ver(VERSION) else None
+
+
 def cmd_resume(args):
     store = load_store()
     repo = store.repo
@@ -2804,6 +2819,10 @@ def cmd_resume(args):
     c = task_counts(st)
     L = ["=== .sci/sci resume | session %d | %s @ %s | %d changed/untracked files | sci %s ===" % (
         st["session"], br, h[:8] if h else "(no commits)", ndirty, VERSION)]
+    newer = installed_newer()
+    if newer:
+        L.append("note: sci %s is installed; this project still runs %s. Update its copy (the state is kept): "
+                 "python3 %s init" % newer)
     L.append("OBJECTIVE: " + (st.get("objective") or "(not set)"))
     L.append("PROGRESS: %d/%d done, %d blocked, %d todo" % (c["done"], len(st["tasks"]), c["blocked"], c["todo"]))
     mark = {"done": "[x]", "active": "[>]", "blocked": "[!]", "todo": "[ ]"}
