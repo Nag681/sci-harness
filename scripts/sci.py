@@ -4502,9 +4502,17 @@ def cmd_purge(args):
     if not args.yes:
         refuse("HUMAN ONLY: purge deletes .sci/ and all sci refs and backups in this repo (a human adds --yes).",
                "Do not purge. If the human asked for it, ask them to run it themselves.")
-    drop_refs(repo, "")
+    with run_lock(repo):  # refuses while a job runs; released first, since Windows cannot delete an open file
+        drop_refs(repo, "")
     shutil.rmtree(str(repo.backup_dir), ignore_errors=True)
-    shutil.rmtree(str(repo.dir), ignore_errors=True)
+    for _ in range(20):  # a worker that just finished may still be exiting
+        shutil.rmtree(str(repo.dir), ignore_errors=True)
+        if not repo.dir.exists():
+            break
+        time.sleep(0.25)
+    else:
+        print("Could not remove all of .sci/ (a file in it is in use). Close what uses it and run purge again.")
+        return 1
     print("Removed .sci/, refs/sci/* and the backup in the git directory.")
     return 0
 
@@ -4760,8 +4768,7 @@ def is_runner(args):
 
 
 def needs_run_lock(args):
-    return is_runner(args) or command_name(args) in ("done", "restore", "lock", "unlock", "purge", "task start",
-                                                     "task block")
+    return is_runner(args) or command_name(args) in ("done", "restore", "lock", "unlock", "task start", "task block")
 
 
 def dispatch(argv):
