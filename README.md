@@ -2,7 +2,7 @@
 
 # Sci-Harness
 
-**Keeps small, inexpensive coding models on track in long scientific coding tasks.**
+**Keeps AI coding agents on track in long, multi-step software work, from small models to the largest.**
 
 [![CI](https://github.com/Nag681/sci-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/Nag681/sci-harness/actions/workflows/ci.yml)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-3776AB?logo=python&logoColor=white)](#install)
@@ -17,7 +17,8 @@
 <br>
 
 AI coding agents forget the plan when their memory fills up. They "fix" a failing test by making the test easier,
-and when they're stuck they keep guessing. Small models do this the most.
+and when they're stuck they keep guessing. Small models do this the most, and every model does it on a long
+enough task.
 
 Sci-Harness gives your agent an [Agent Skill](https://agentskills.io) called **`sci`**. It brings a notebook that
 survives memory loss, a referee that runs the tests and refuses shortcuts, and a short rulebook. It works with
@@ -227,7 +228,7 @@ Each:  $38.34, $38.33, $38.33
 
 ## What it fixes
 
-| Small models tend to… | Sci-Harness… |
+| Coding agents on long tasks tend to… | Sci-Harness… |
 | --- | --- |
 | 🧠 lose the plan when their memory fills up | keeps the plan, notes and progress in `.sci/`, and every step ends with `NEXT:` |
 | 🧪 "fix" a failing test by weakening it | locks tests and catches loosened tolerances, removed asserts and skips |
@@ -304,7 +305,7 @@ flowchart TD
     S --> G
     K -- "strike 3, second time" --> X["ESCALATE: start over or ask you"]
     H -- "PASS" --> V{"verify"}
-    V -- "FAIL" --> G
+    V -- "FAIL: check now reruns what failed" --> G
     V -- "PASS" --> Z["done: commit, protect the test"]
     Z --> C
 ```
@@ -314,13 +315,13 @@ flowchart TD
 | Rule | In plain words |
 | --- | --- |
 | 🧪 **Test first** | For a new feature, the first `check` must FAIL. For a clean-up that shouldn't change behavior, it must PASS. |
-| 🔒 **Lock** | `lock` saves a fingerprint and a copy of the test files. Any change to them makes every check FAIL, even when the tests pass. Only `unlock` with a written reason frees them, and that goes on your review list. |
-| ❌ **Strikes** | A strike is a failed check after a code change, once the test is locked. Failures before the lock, or reruns without changes, don't count. A PASS resets the count. Each strike saves the attempt as a patch in `.sci/attempts/`. |
+| 🔒 **Lock** | `lock` saves a fingerprint and a copy of the test files. Any change to them makes every check FAIL, even when the tests pass. Only `unlock` with a written reason frees them, for example when a test must follow an intended change of the task such as a new signature, and that goes on your review list. |
+| ❌ **Strikes** | A strike is a failed check after a code change, once the test is locked. Failures before the lock, reruns without changes and checks that fail only on the guard don't count. A PASS resets the count. After a failed verify, `check` also reruns the step that failed (only the failing tests of the suite, when sci can select them), so a fix that misses it is a strike too. Each strike saves the attempt as a patch in `.sci/attempts/`. |
 | 🛑 **STOP** | At 3 strikes in a row, the agent must stop editing code. The STOP lifts once the agent has written 2 new guesses (*hypotheses*), run at least one experiment through sci and used it to rule a guess in or out, or when a check passes. |
 | 🚨 **ESCALATE** | If the agent hits 3 strikes again after a STOP (6 failed fixes), it starts the task over a different way or asks you. Every guess it ruled out stays listed, so it never retries a dead end. |
-| 🛡️ **Guard** | Every check and verify confirms four things. The locked test is untouched. Finished tasks' tests are untouched. No test was weakened: no new skip, no deleted assert, no `assert True`, no looser tolerance, no changed expected number. And nobody edited the plan by hand. Breaking any of these counts as a FAIL. |
-| ✅ **Verify** | Runs these in order and stops at the first failure: the guard, then the build (for compiled code), this task's test, every finished task's test, the saved numbers (compared to about 12 digits) and finally the whole test suite (only new failures count). No test runs twice: a finished task's test that the suite runs anyway is left to the suite, and a failure there names that task. A step that already passed on the same code with the same installed packages is reused instead of rerun; documentation the step can't read doesn't count as code (`verify --fresh` reruns everything). `verify --quick` runs only the first three. |
-| 📦 **Done** | Refuses until the full verify has passed on exactly the current files, the test is locked, nothing outside the task's files has changed, no stray new files are left and no debugger lines remain. Edits to documentation that no test or check reads are fine on both counts. A justified exception goes on your review list. Then `done` commits only this task's files as `[T1]`, and its tests become protected for every later task. |
+| 🛡️ **Guard** | Every check and verify confirms four things. The locked test is untouched. Finished tasks' tests are untouched. No test was weakened: no new skip, no deleted assert, no `assert True`, no looser tolerance, no changed expected number. And nobody edited the plan by hand. Breaking any of these counts as a FAIL, though not as a strike. |
+| ✅ **Verify** | Runs these in order and stops at the first failure: the guard, then the build (for compiled code), this task's test, every finished task's test, the saved numbers (compared to about 12 digits) and finally the whole test suite (only new failures count). No test runs twice: a finished task's test that the suite runs anyway is left to the suite, and a failure there names that task. sci knows this for pytest, unittest, cargo, go, ctest, jest, vitest, dotnet and Gradle. A step that already passed on the same code with the same installed packages is reused instead of rerun; documentation the step can't read doesn't count as code (`verify --fresh` reruns everything). `verify --quick` runs only the first three. |
+| 📦 **Done** | Refuses until the full verify has passed on exactly the current files, the test is locked, nothing outside the task's files has changed, no stray new files are left and no debugger lines remain. Edits to documentation that no test or check reads, and comment or layout edits in Python files when no check reads the source as text, are fine on both counts. A justified exception goes on your review list. Then `done` commits only this task's files as `[T1]`, and its tests become protected for every later task. |
 | ⏳ **Long runs** | `check`, `verify`, `run`, `baseline` and `golden` run in the background. If one takes longer than 100 seconds, sci says STILL RUNNING and the agent collects the result with `.sci/sci wait`, so a tool timeout or a restarted session loses nothing. Meanwhile the agent can take notes, but other test runs and edits wait; files edited during a run make its result not count. |
 | ↩️ **Restore** | Undo, back to the last PASS or to the task's start. It saves the current version as a patch first and always puts locked tests back exactly. |
 
@@ -338,7 +339,8 @@ After each step, sci prints a `NEXT:` line. It takes the first row that applies:
 | a guard rule was broken | undo that change |
 | the test isn't locked yet | write the test, `check`, then `lock` |
 | verify found changed saved numbers | fix the code, or explain the change with `golden update`, then `verify` again |
-| the last check failed | fix the code, not the tests (strike n/3) |
+| the last check or verify failed | fix the code, not the tests, then `check`, which also reruns what verify failed on (strike n/3) |
+| a `check --cmd` passed, but not what verify failed on | run `check` |
 | the checks pass | run `verify` (again if files changed since) |
 | verified | run `done` |
 | no task is active | start the next task whose dependencies are done |
@@ -416,8 +418,11 @@ settings inside `.git/`. If `.sci/` gets deleted, running `init` again brings th
 <details>
 <summary><b>Is it only for scientific code?</b></summary>
 
-No. It was built for scientific and numerical code, which is why it has the saved-numbers check, but the loop
-works for any code that has tests. The example above is a bill splitter.
+No. It is a software-engineering skill for features, bug fixes, refactors and migrations in any language whose
+tests run from the command line. For pytest, unittest, cargo, go, ctest, jest, vitest, Maven, Gradle, dotnet,
+RSpec and PHPUnit it also reads which tests failed, so a baseline of known failures works. It has extra checks
+for numerical code (saved reference numbers and the convergence order), which you can ignore when you don't
+need them. The example above is a bill splitter.
 
 </details>
 
@@ -454,7 +459,10 @@ in the foreground with `.sci/sci config set background false` (sci tells the age
 <details>
 <summary><b>Is it only for small models?</b></summary>
 
-No. It is tuned for small models, but larger ones get the same safety rails on long tasks.
+No. Small models gain the most because they lose the plan soonest, but larger ones use the same loop on long
+tasks. sci keeps out of their way. After a failed verify, `check` reruns just what failed, so a fix takes one
+test run to confirm. Passes on unchanged code are reused. A test that must follow an intended change costs no
+strike. And edits to documentation, or to comments and layout in Python, don't need another verify.
 
 </details>
 

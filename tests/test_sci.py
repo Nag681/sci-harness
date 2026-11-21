@@ -357,7 +357,7 @@ class TestLoop(unittest.TestCase):
         self.assertIn("All tasks done. Run `.sci/sci verify`", st["next"])
         sb.ok("verify")
         self.assertIn("final verify passed. Run `.sci/sci report`", sb.state()["next"])
-        sb.write("pkg/core.py", sb.read("pkg/core.py") + "\n# edit after the final verify\n")
+        sb.write("pkg/core.py", sb.read("pkg/core.py") + "\nEDITED_AFTER_FINAL_VERIFY = 1\n")
         self.assertIn("All tasks done. Run `.sci/sci verify`", sb.ok("resume"))
 
     def test_check_exit_code_governs_not_output_text(self):
@@ -449,7 +449,7 @@ class TestLoop(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("not verified", out)
         sb.ok("verify")
-        sb.write("pkg/core.py", sb.read("pkg/core.py") + "\n# late edit\n")
+        sb.write("pkg/core.py", sb.read("pkg/core.py") + "\nLATE_EDIT = 1\n")
         rc, out = sb.sci("done", "-m", "x")
         self.assertEqual(rc, 2)
         self.assertIn("not verified on the current files", out)
@@ -761,6 +761,9 @@ class TestGoldenAndBaseline(unittest.TestCase):
         rc, out = sb.sci("verify")
         self.assertEqual(rc, 1, out)
         self.assertIn("NEXT: Golden euler changed", out)
+        rc, out = sb.sci("check")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("FAIL golden euler", out)
         out = sb.ok("golden", "update", "euler", "--reason", "euler now applies the corrected rate")
         self.assertIn("NEXT: Golden euler is up to date. Run `.sci/sci verify` again.", out)
         self.assertNotIn("uncommitted changes", out)
@@ -843,6 +846,81 @@ class TestReuse(unittest.TestCase):
         self.assertEqual(rc, 1, out)
         self.assertIn("REGRESSION: your change broke T1's tests (test_rk2.TestRK2.test_order)", out)
 
+    def _tune_verified(self, sb, verify=None):
+        sb.init()
+        sb.ok("task", "add", "tune", "--verify", verify or ("%s tests.test_core -q" % UT), "--scope", "pkg/core.py")
+        for c in (("task", "start"), ("check",), ("lock",), ("verify",)):
+            sb.ok(*c)
+
+    def test_comments_and_layout_in_python_need_no_new_verify(self):
+        sb = Sandbox(self)
+        self._tune_verified(sb)
+        relaid = "# Scaling and a simple integrator.\n\n\n" + CORE.replace(
+            "    return x * k", "    return (x\n            * k)  # k scales")
+        sb.write("pkg/core.py", relaid)
+        out = sb.ok("resume")
+        self.assertIn('NEXT: Verified. Run `.sci/sci done -m "<summary>"`', out)
+        sb.write("pkg/core.py", relaid.replace("    return (x", '    """Return x times k."""\n    return (x'))
+        rc, out = sb.sci("done", "-m", "tune")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("not verified on the current files", out)
+        sb.write("pkg/core.py", relaid)
+        sb.write("tests/test_core.py", "# a comment in a locked test\n" + TEST_CORE)
+        rc, out = sb.sci("done", "-m", "tune")
+        self.assertEqual(rc, 2, out)
+        sb.write("tests/test_core.py", TEST_CORE)
+        if not WINDOWS:
+            os.chmod(str(sb.root / "pkg" / "core.py"), 0o755)
+            rc, out = sb.sci("done", "-m", "tune")
+            self.assertEqual(rc, 2, out)
+            os.chmod(str(sb.root / "pkg" / "core.py"), 0o644)
+        out = sb.ok("done", "-m", "tune")
+        self.assertIn("comments or layout", out)
+        self.assertIn("pkg/core.py", sb.git("show", "--stat", "HEAD"))
+
+    def test_a_check_that_reads_source_text_sees_comment_edits(self):
+        for verify in ("%s tests.test_core -q && grep -q scale pkg/core.py" % UT,
+                       "%s tests.test_core -q  # make lint" % UT):
+            sb = Sandbox(self)
+            self._tune_verified(sb, verify)
+            sb.write("pkg/core.py", "# a comment\n" + CORE)
+            rc, out = sb.sci("done", "-m", "tune")
+            self.assertEqual(rc, 2, out)
+            self.assertIn("not verified on the current files", out)
+
+    def test_with_goldens_comments_must_keep_line_numbers(self):
+        sb = Sandbox(self)
+        sb.init()
+        sb.ok("golden", "add", "euler", "--cmd", "%s demo.py" % PYQ)
+        sb.ok("task", "add", "tune", "--verify", "%s tests.test_core -q" % UT, "--scope", "pkg/core.py")
+        for c in (("task", "start"), ("check",), ("lock",), ("verify",)):
+            sb.ok(*c)
+        sb.write("pkg/core.py", "# moves every line down\n" + CORE)
+        rc, out = sb.sci("done", "-m", "tune")
+        self.assertEqual(rc, 2, out)
+        sb.write("pkg/core.py", CORE.replace("    return x * k", "    return x * k  # same line"))
+        self.assertIn("comments or layout", sb.ok("done", "-m", "tune"))
+
+    @unittest.skipIf(WINDOWS, "a POSIX shell script stands in for ctest")
+    def test_a_ctest_suite_runs_earlier_checks_once(self):
+        sb = Sandbox(self)
+        sb.write("bin/ctest", "#!/bin/sh\necho '100% tests passed, 0 tests failed out of 2'\n")
+        os.chmod(str(sb.root / "bin" / "ctest"), 0o755)
+        env = {"PATH": str(sb.root / "bin") + os.pathsep + os.environ.get("PATH", "")}
+        sb.git("add", "-A")
+        sb.git("commit", "-q", "-m", "ctest")
+        sb.init()
+        sb.ok("config", "set", "regress_cmd", "ctest --test-dir build")
+        sb.ok("task", "add", "heat", "--verify", "ctest --test-dir build -R heat", "--scope", "pkg/core.py")
+        sb.ok("task", "add", "wave", "--verify", "ctest --test-dir build -R wave", "--scope", "pkg/core.py")
+        none = ("lock", "--none", "ctest selects the tests by name")
+        for c in (("task", "start"), ("check",), none, ("verify",), ("done", "-m", "T1"), ("task", "start"), ("check",),
+                  none):
+            sb.ok(*c, env=env)
+        out = sb.ok("verify", env=env)
+        self.assertIn("note: the regression suite runs the tests of T1", out)
+        self.assertNotIn("regression T1", out)
+
     def test_done_accepts_doc_edits_after_verify_unless_a_test_reads_the_doc(self):
         sb = Sandbox(self)
         sb.write("README.md", "# demo\n")
@@ -861,7 +939,7 @@ class TestReuse(unittest.TestCase):
         sb.write("NOTES.md", "numbers\n")
         sb.write("README.md", "# demo\n\nNow with rk2.\n")
         out = sb.ok("done", "-m", "feat: rk2")
-        self.assertIn("Only documentation changed since verify (README.md)", out)
+        self.assertIn("Only documentation, comments or layout changed since verify (README.md)", out)
         self.assertIn("README.md", sb.git("show", "--name-only", "--format=", "HEAD").split())
 
     def test_a_docs_task_reuses_the_suite(self):
@@ -972,6 +1050,149 @@ def kill_job(job):
         else:
             with contextlib.suppress(OSError):
                 os.killpg(int(pid), signal.SIGKILL)
+
+
+ADD_TEST = '''\
+import unittest
+from pkg.calc import add
+
+
+class T(unittest.TestCase):
+    def test_add(self):
+        self.assertEqual(add(2, 3), 5)
+'''
+MUL_TEST = '''\
+import unittest
+from pkg.calc import mul
+
+
+class T(unittest.TestCase):
+    def test_mul(self):
+        self.assertEqual(mul(2, 3), 6)
+'''
+
+
+class TestFailedVerify(unittest.TestCase):
+    def calc(self, k=0):
+        return "def add(a, b):\n    return a + b + %d\n\n\ndef mul(a, b):\n    return a * b\n" % k
+
+    def _regressed(self, sb):
+        """T1 (add) done; T2 (mul) locked, and its verify failed because the change broke T1's check."""
+        sb.write("pkg/calc.py", "def add(a, b):\n    return a + b\n")
+        sb.write("tests/test_add.py", ADD_TEST)
+        sb.git("add", "-A")
+        sb.git("commit", "-q", "-m", "add")
+        sb.init()
+        sb.ok("task", "add", "add works", "--verify", "%s tests.test_add -q" % UT, "--scope", "pkg/calc.py")
+        sb.ok("task", "add", "mul", "--verify", "%s tests.test_mul -q" % UT, "--scope", "pkg/calc.py")
+        for c in (("task", "start"), ("check",), ("lock",), ("verify",), ("done", "-m", "T1")):
+            sb.ok(*c)
+        sb.ok("task", "start")
+        sb.write("tests/test_mul.py", MUL_TEST)
+        sb.sci("check")
+        sb.ok("lock")
+        sb.write("pkg/calc.py", self.calc(1))
+        sb.ok("check")
+        rc, out = sb.sci("verify")
+        self.assertEqual(rc, 1, out)
+        return out
+
+    def test_check_reruns_what_verify_failed_and_counts_strikes(self):
+        sb = Sandbox(self)
+        out = self._regressed(sb)
+        self.assertIn("REGRESSION: your change broke T1's check", out)
+        self.assertIn("it also reruns regression T1", out)
+        for k in (2, 3, 4):
+            sb.write("pkg/calc.py", self.calc(k))
+            rc, out = sb.sci("check")
+            self.assertEqual(rc, 1, out)
+            self.assertIn("FAIL regression T1", out)
+        self.assertIn("STOP", out)
+        self.assertEqual(sb.state()["tasks"][1]["strikes"], 3)
+        sb.write("pkg/calc.py", self.calc(0))
+        out = sb.ok("check")
+        self.assertIn("PASS regression T1", out)
+        self.assertIn("STOP cleared", out)
+        self.assertIn("PASS regression T1: reused", sb.ok("verify"))
+        sb.ok("done", "-m", "T2")
+
+    def test_restarting_a_task_forgets_its_old_verify_failure(self):
+        sb = Sandbox(self)
+        self._regressed(sb)
+        sb.ok("task", "block", "T2", "--reason", "parked while the human decides")
+        sb.ok("task", "unblock", "T2")
+        sb.ok("task", "start", "T2")
+        self.assertIsNone(sb.state()["tasks"][1].get("pending"))
+
+    def test_a_guard_violation_still_strikes_when_the_rerun_fails(self):
+        sb = Sandbox(self)
+        self._regressed(sb)
+        sb.write("pkg/calc.py", self.calc(2))
+        sb.write("tests/test_add.py", ADD_TEST.replace("add(2, 3), 5)", "add(2, 3), 5)  # touched"))
+        rc, out = sb.sci("check")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("PROTECTED TEST CHANGED", out)
+        self.assertIn("FAIL regression T1", out)
+        self.assertEqual(sb.state()["tasks"][1]["strikes"], 1)
+
+    def test_a_test_that_must_follow_an_api_change_costs_no_strike(self):
+        sb = Sandbox(self)
+        sb.write("pkg/calc.py", "def add(a, b):\n    return a + b\n")
+        sb.write("tests/test_add.py", ADD_TEST)
+        sb.git("add", "-A")
+        sb.git("commit", "-q", "-m", "add")
+        sb.init()
+        sb.ok("task", "add", "add works", "--verify", "%s tests.test_add -q" % UT, "--scope", "pkg/calc.py")
+        sb.ok("task", "add", "keyword api", "--verify", "%s tests.test_mul -q" % UT, "--scope", "pkg/calc.py")
+        for c in (("task", "start"), ("check",), ("lock",), ("verify",), ("done", "-m", "T1")):
+            sb.ok(*c)
+        sb.ok("task", "start")
+        sb.write("tests/test_mul.py", MUL_TEST.replace("mul(2, 3)", "mul(x=2, y=3)"))
+        sb.sci("check")
+        sb.ok("lock")
+        sb.write("pkg/calc.py", "def add(x, y):\n    return x + y\n\n\ndef mul(x, y):\n    return x * y\n")
+        sb.write("tests/test_add.py", ADD_TEST.replace("add(2, 3)", "add(x=2, y=3)"))
+        rc, out = sb.sci("check")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("PROTECTED TEST CHANGED", out)
+        self.assertIn("must follow an intended change of this task", out)
+        self.assertEqual(sb.state()["tasks"][1]["strikes"], 0)
+        sb.ok("unlock", "tests/test_add.py", "--reason", "calls add() with the new keyword names")
+        sb.ok("check")
+        sb.ok("verify")
+
+    def test_suite_failure_is_rerun_narrowly_then_whole_when_tests_depend_on_each_other(self):
+        sb = Sandbox(self)
+        sb.write("pkg/state.py", "SEEN = []\n\n\ndef record(x):\n    return list(SEEN) + [x]\n")
+        sb.write("tests/test_a.py", "import unittest\nfrom pkg import state\n\n\nclass T(unittest.TestCase):\n"
+                                    "    def test_a(self):\n        self.assertEqual(state.record(1), [1])\n")
+        sb.write("tests/test_b.py", "import unittest\nfrom pkg import state\n\n\nclass T(unittest.TestCase):\n"
+                                    "    def test_b(self):\n        self.assertEqual(state.SEEN, [])\n")
+        sb.git("add", "-A")
+        sb.git("commit", "-q", "-m", "state")
+        sb.init()
+        sb.ok("baseline", "--cmd", "%s discover -s . -p 'test_*.py'" % UT)
+        sb.ok("task", "add", "record remembers", "--verify", "%s tests.test_a -q" % UT, "--scope", "pkg/state.py")
+        sb.ok("task", "start")
+        sb.ok("check")
+        sb.ok("lock")
+        sb.write("pkg/state.py", "SEEN = []\n\n\ndef record(x):\n    SEEN.append(x)\n    return list(SEEN)\n")
+        rc, out = sb.sci("verify")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("NEW FAILURES (not in baseline): tests.test_b.T.test_b", out)
+        out = sb.ok("check")
+        self.assertIn("tests.test_b.T.test_b", out)
+        self.assertIn("PASS regression suite", out)
+        rc, out = sb.sci("verify")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("pass when they run alone but fail in the full suite", out)
+        rc, out = sb.sci("check")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("FAIL regression suite", out)
+        sb.write("pkg/state.py", "SEEN = []\n\n\ndef record(x):\n    return list(SEEN) + [x]\n")
+        sb.ok("check")
+        sb.ok("verify")
+        self.assertIsNone(sb.state()["tasks"][0].get("pending"))
 
 
 class TestBackground(unittest.TestCase):
@@ -1189,6 +1410,42 @@ class TestUnits(unittest.TestCase):
             "tests/test_a.py::test_x", "tests/test_b.py", "tests/test_c.py::test_y", "tests.test_d.TestD.test_z",
             "tests.test_e.TestE.test_w", "TestGo", "mod::t", "heat_1d"])
 
+    def test_weakening_rules_beyond_python(self):
+        def issues(old, new, path):
+            diff = "\n".join(__import__("difflib").unified_diff(old.splitlines(), new.splitlines(), lineterm="", n=0))
+            return sci.weakening_issues(path, sci.parse_hunks(diff), old, new)
+        js = "test('adds', () => {\n  expect(add(1, 2)).toBe(3)\n})\n"
+        self.assertTrue(any("skip/xfail" in i for i in issues(js, js.replace("test(", "test.only("), "src/a.test.js")))
+        cs = "[Fact]\npublic void Adds() { Assert.Equal(3, Add(1, 2)); }\n"
+        self.assertTrue(any("skip/xfail" in i for i in issues(cs, cs.replace("[Fact]", '[Fact(Skip = "later")]'),
+                                                              "tests/CalcTests.cs")))
+        self.assertTrue(any("removed" in i for i in issues(cs, cs.replace("Assert.Equal(3, Add(1, 2));", ""),
+                                                           "tests/CalcTests.cs")))
+        go = "func TestAdd(t *testing.T) {\n\tif Add(1, 2) != 3 {\n\t\tt.Errorf(\"bad\")\n\t}\n}\n"
+        self.assertTrue(any("removed" in i for i in issues(go, go.replace('\t\tt.Errorf("bad")\n', ""), "calc_test.go")))
+        for p in ("src/__tests__/cart.js", "src/test/java/CartTest.java", "Shop.Tests/CartTests.cs"):
+            self.assertTrue(sci.is_test(p, sci.DEFAULT_CONFIG), p)
+
+    def test_failure_extraction_beyond_python(self):
+        lines = [" FAIL  src/sum.test.js", " FAIL  src/math.test.ts > adds > negatives",
+                 "[ERROR] com.example.FooTest.testBar -- Time elapsed: 0.012 s <<< FAILURE!",
+                 "[ERROR] testBaz(com.example.FooTest)  Time elapsed: 0.01 s  <<< ERROR!",
+                 "com.example.BarTest > testQux() FAILED", "  Failed Shop.Tests.CartTests.Empty [12 ms]",
+                 "rspec ./spec/cart_spec.rb:12 # Cart is empty", "1) Tests\\CartTest::testEmpty",
+                 "FAIL: not a jest line", "1) mocha suite", "Failed upload [1/3]", "1) Error::message is shown",
+                 "Notes > see FAILED"]
+        self.assertEqual(sci.extract_failures(lines), [
+            "src/sum.test.js", "src/math.test.ts", "com.example.FooTest.testBar", "com.example.FooTest.testBaz",
+            "com.example.BarTest.testQux", "Shop.Tests.CartTests.Empty", "./spec/cart_spec.rb:12",
+            "Tests\\CartTest::testEmpty"])
+        self.assertEqual(sci.extract_summary(["Tests run: 10, Failures: 1, Errors: 0, Skipped: 0",
+                                              "10 tests completed, 1 failed"]),
+                         ["Tests run: 10, Failures: 1, Errors: 0, Skipped: 0", "10 tests completed, 1 failed"])
+        self.assertEqual(sci.extract_summary(["Failed!  - Failed:     1, Passed:     9, Skipped:     0, Total:    10",
+                                              "10 examples, 1 failure"]),
+                         ["Failed!  - Failed:     1, Passed:     9, Skipped:     0, Total:    10",
+                          "10 examples, 1 failure"])
+
     def test_weakening_rules(self):
         def issues(old, new, path="tests/test_x.py"):
             diff = "\n".join(__import__("difflib").unified_diff(old.splitlines(), new.splitlines(), lineterm="", n=0))
@@ -1283,6 +1540,57 @@ class TestUnits(unittest.TestCase):
 
 
 class TestReuseUnits(unittest.TestCase):
+    def test_non_python_suites_cover_checks_that_only_narrow_them(self):
+        cov = sci.runner_covers
+        self.assertEqual(cov("cargo test", "cargo test energy", []), ["energy"])
+        self.assertEqual(cov("cargo test --release", "cargo test --release energy -- --nocapture", []), ["energy"])
+        self.assertIsNone(cov("cargo test", "cargo test -- --ignored", []))
+        self.assertIsNone(cov("cargo test energy", "cargo test energy_x", []))
+        self.assertIsNone(cov("cargo test", "cargo test --release energy", []))
+        self.assertIsNone(cov("cargo test", "cargo test energy", ["mod::t"]))
+        self.assertEqual(cov("go test ./...", "go test ./internal/heat -run TestHeat", []),
+                         ["TestHeat", "./internal/heat"])
+        self.assertIsNone(cov("go test -short ./...", "go test ./internal/heat", []))
+        self.assertIsNone(cov("go test ./cmd/...", "go test ./internal/heat", []))
+        self.assertEqual(cov("ctest --test-dir build", "ctest --test-dir build -R heat --output-on-failure", []),
+                         ["heat"])
+        self.assertIsNone(cov("ctest --test-dir build -E slow", "ctest --test-dir build -R heat", []))
+        self.assertEqual(cov("npx jest --ci", "npx jest --ci src/cart.test.ts", []), ["src/cart.test.ts"])
+        self.assertIsNone(cov("npx jest --onlyChanged", "npx jest src/cart.test.ts", []))
+        self.assertEqual(cov("npx vitest run", "npx vitest run cart -t empty", []), ["cart", "empty"])
+        self.assertEqual(cov("dotnet test", "dotnet test --filter FullyQualifiedName~Cart", []),
+                         ["FullyQualifiedName~Cart"])
+        self.assertEqual(cov("./gradlew test", "./gradlew test --tests '*CartTest*'", []), ["*CartTest*"])
+        self.assertIsNone(cov("mvn test", "mvn test -Dtest=CartIT", []))
+        self.assertIsNone(cov("cargo test", "cargo test --test energy", []))
+        self.assertIsNone(cov("go test ./...", "go test ./vendor/x", []))
+        self.assertIsNone(cov("go test ./...", "go test ./tools/gen", [], {"tools/go.mod": 1}))
+        self.assertEqual(cov("go test ./...", "go test ./internal/...", []), ["./internal/..."])
+        self.assertIsNone(cov("make test", "make test T=cart", []))
+        self.assertIsNone(cov("cargo test && cargo clippy", "cargo test energy", []))
+        self.assertEqual(sci.blame_tasks([("T1", [], ["energy"]), ("T2", [], ["*CartTest*"])],
+                                         ["physics::energy_conserved", "com.x.CartTest.testEmpty"]),
+                         [("T1", ["physics::energy_conserved"]), ("T2", ["com.x.CartTest.testEmpty"])])
+
+    def test_source_text_tools_are_recognized(self):
+        for c in ("ruff check .", "pytest --flake8", "pytest --cov=pkg", "make lint", "grep -q x a.py", "tox -e mypy"):
+            self.assertTrue(sci.SOURCE_TEXT_RE.search(c), c)
+        for c in ("python -m unittest discover -s tests", "pytest -q tests", "cargo test energy"):
+            self.assertIsNone(sci.SOURCE_TEXT_RE.search(c), c)
+
+    def test_narrow_suite_reruns_only_the_failing_tests(self):
+        files = {"tests/__init__.py": 1, "tests/test_a.py": 1}
+        self.assertEqual(sci.narrow_suite("python -m pytest -q tests", ["tests/test_a.py::test_x[1-2]"], files),
+                         "python -m pytest -q 'tests/test_a.py::test_x[1-2]'")
+        self.assertEqual(sci.narrow_suite("python -m unittest discover -s . -q", ["tests.test_a.T.test_x"], files),
+                         "python -m unittest tests.test_a.T.test_x")
+        self.assertIsNone(sci.narrow_suite("python -m unittest discover -s tests", ["test_a.T.test_x"], files))
+        self.assertEqual(sci.narrow_suite("python -m unittest", ["tests.test_a.T.setUpClass", "tests.test_a.setUpModule",
+                                                                 "tests.test_a.T.test_y"], files),
+                         "python -m unittest tests.test_a.T tests.test_a tests.test_a.T.test_y")
+        self.assertIsNone(sci.narrow_suite("make test", ["tests/test_a.py::test_x"], files))
+        self.assertIsNone(sci.narrow_suite("python -m pytest -q", [], files))
+
     def test_parse_test_cmd(self):
         p = sci.parse_test_cmd
         s = p("python -m pytest -q tests/test_a.py::TestA::test_x")
@@ -1320,7 +1628,7 @@ class TestReuseUnits(unittest.TestCase):
         self.assertIsNone(cov(pt, "python -m pytest tests/test-b.py"))  # run by name, not collected by the suite
         self.assertIsNone(cov(pt, "python -m pytest tests/test_a.py", ini={"addopts": ["-m", "not", "slow"]}))
         self.assertIsNone(cov("python -m pytest tests/sub", "python -m pytest tests/test_a.py"))
-        self.assertEqual(sci.blame_tasks([("T1", ["tests/test_a.py"])], ["test_a.TestA.test_x", "test_z.T.t"]),
+        self.assertEqual(sci.blame_tasks([("T1", ["tests/test_a.py"], [])], ["test_a.TestA.test_x", "test_z.T.t"]),
                          [("T1", ["test_a.TestA.test_x"])])
 
     def test_py_strings_skip_docstrings_and_comments(self):
@@ -1566,8 +1874,15 @@ class TestHooks(unittest.TestCase):
         self.assertEqual(out, {})
         self.assertEqual(json.loads(self.hook("agy-stop", dict(ws, terminationReason="NO_TOOL_CALL"))), {})
         sb.ok("config", "set", "autopilot", "true")
-        stops = [json.loads(self.hook("agy-stop", dict(ws, terminationReason="NO_TOOL_CALL"))) for _ in range(3)]
-        self.assertEqual([s.get("decision") for s in stops], ["continue", "continue", None])
+
+        def stop():
+            return json.loads(self.hook("agy-stop", dict(ws, terminationReason="NO_TOOL_CALL"))).get("decision")
+        self.assertEqual([stop(), stop(), stop()], ["continue", "continue", None])
+        sb.ok("resume")
+        sb.ok("note", "reading and notes are not progress")
+        self.assertIsNone(stop())
+        sb.sci("check")
+        self.assertEqual([stop(), stop(), stop()], ["continue", "continue", None])
         sb.ok("pause")
         self.assertEqual(json.loads(self.hook("agy-pre-invocation", ws)), {})
 

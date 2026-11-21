@@ -473,8 +473,8 @@ def install_agy(plan, home_dir, copy, prefix, force, hooks):
     if plan.dry:
         return
     pdir.mkdir(parents=True, exist_ok=True)
-    desc = ("Durable-memory harness for long-horizon scientific and numerical coding in large codebases; built "
-            "for small models.")
+    desc = ("Keeps coding agents on track in long, multi-step software work: features, bug fixes, refactors, "
+            "migrations and scientific code.")
     (pdir / "plugin.json").write_text(json.dumps({"name": NAME, "displayName": "Sci-Harness",
                                                   "description": desc, "version": VERSION}, indent=2) + "\n",
                                       encoding="utf-8")

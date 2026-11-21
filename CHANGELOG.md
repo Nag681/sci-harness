@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.0] - 2026-11-21
+
+sci is now a general software-engineering skill: features, bug fixes, refactors, migrations and performance work
+in any language, with its numerical checks as one part. The changes below remove the places where it slowed
+capable agents down without catching anything.
+
+### Changed
+- After a failed `verify`, `check` also reruns the step that failed (an earlier task's check, a golden or the
+  regression suite) until it passes. A failing suite is rerun as just its failing tests when sci can select them
+  (pytest node ids, unittest ids); if those pass alone but still fail in the full suite, sci says the tests
+  depend on each other and reruns the whole suite from then on. A fix that misses the failure now counts as a
+  strike, so STOP works for regressions too. Before, `check` ran only the task's own test, passed, reset the
+  strikes and sent the agent back to a full `verify`.
+- A check whose tests pass but which changes a locked or protected test is still a FAIL, but no longer a strike.
+  The GUARD FIX and REGRESSION lines say that `unlock --reason` is the right step when a test must follow an
+  intended change of the task, such as a new signature.
+- `done`, `resume` and NEXT accept edits made after `verify` to comments and layout in Python files: the syntax
+  tree is unchanged, docstrings included. This does not apply when a check reads source as text (a linter,
+  formatter, type checker, doctest or `grep`).
+- More test runners. sci reads the failing tests of jest, vitest, Maven, Gradle, dotnet, RSpec and PHPUnit, so
+  baselines work for them. Earlier tasks' checks are left to the regression suite for cargo, go, ctest, jest,
+  vitest, dotnet and Gradle when the check is the suite's command plus a test selection that cannot reach tests
+  the suite leaves out, and a suite failure names the task. Not when the baseline has failures.
+- Defaults for more languages: test files (`__tests__/`, `*Test.*`, `*Tests.*`), rebuild triggers for
+  TypeScript, the JVM, .NET, Swift, Go and Zig, test-weakening checks for focused tests (`it.only`, `fit`),
+  xUnit, NUnit and PHPUnit skips, and C# and Go assertions.
+- Autopilot (Antigravity hooks, off by default) lets the agent stop after two stops in a row without a test run
+  or a task status change. Reading the state or writing notes in between no longer counts as progress.
+- SKILL.md: rule 3 covers the numbers an agent writes into code and tests, and a one-line `sci run` satisfies
+  it. A test that must follow an intended change may be unlocked with a reason. The plan step says which check
+  fits a feature, bug fix, refactor, performance or numerical task. `resume` is no longer asked for every 20
+  tool calls. Widening the scope is the first answer to OUT OF SCOPE when the change is needed.
+
 ## [3.2.0] - 2026-10-29
 
 Long sessions spent most of their time waiting on `verify`: every test ran twice, nothing was reused, and long

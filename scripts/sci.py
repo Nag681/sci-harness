@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""sci: durable state, verification and recovery for long-horizon scientific coding.
+"""sci: durable state, verification and recovery for long, multi-step software work.
 
 Everything lives in <repo>/.sci/ (git-ignored through .git/info/exclude):
   state.json    plan, tasks, hypotheses, notes, goldens, locks (change it only through sci)
@@ -36,7 +36,7 @@ import threading
 import time
 from pathlib import Path
 
-VERSION = "3.2.0"
+VERSION = "3.3.0"
 SD = ".sci"
 SCHEMA = 1
 WINDOWS = os.name == "nt"
@@ -51,11 +51,15 @@ DEFAULT_CONFIG = {
         "**/*.f", "**/*.for", "**/*.f90", "**/*.F90", "**/*.f95", "**/*.F",
         "**/*.pyx", "**/*.pxd", "**/*.rs", "**/CMakeLists.txt", "**/*.cmake", "**/meson.build", "setup.py",
         "setup.cfg", "pyproject.toml", "**/Cargo.toml",
+        "**/*.ts", "**/*.tsx", "**/*.mts", "**/*.cts", "**/tsconfig*.json", "**/package.json",
+        "**/*.java", "**/*.kt", "**/*.kts", "**/*.scala", "**/pom.xml", "**/*.gradle",
+        "**/*.cs", "**/*.csproj", "**/*.swift", "**/*.go", "**/go.mod", "**/*.zig",
     ],
     "test_globs": [
         "tests/**", "test/**", "testing/**", "**/tests/**", "**/test/**", "**/testing/**",
         "**/test_*", "**/*_test.*", "**/*_tests.*", "**/*.test.*", "**/*.spec.*",
-        "**/*_spec.*", "**/spec/**", "**/conftest.py", "**/runtests.jl",
+        "**/*_spec.*", "**/spec/**", "**/conftest.py", "**/runtests.jl", "**/__tests__/**", "**/*Test.*",
+        "**/*Tests.*",
     ],
     "ignore_globs": [
         ".gemini/**", ".claude/**", ".codex/**", ".cursor/**", ".agents/**", ".agent/**",
@@ -429,7 +433,7 @@ def new_state(objective):
         "next_task": 1, "next_hyp": 1, "next_note": 1, "hyps": [], "notes": [], "now": None,
         "goldens": {}, "protected": {}, "acks": {}, "review": [], "baseline": None, "runs": 0,
         "paused": False, "last_verify": None, "violations": [], "last_build_tree": None,
-        "autopilot_streak": 0, "passes": {}, "durations": {},
+        "passes": {}, "durations": {},
     }
 
 
@@ -574,17 +578,12 @@ class Store:
         self.st["runs"] = max(int(self.st.get("runs") or 0), self.max_run)
         return self.st, self.cfg
 
-    def save(self, live_tree=None, live_fp=None):
+    def save(self, live_tree=None):
         st = self.st
         st["updated"] = now_iso()
         st["version"] = VERSION
-        if live_tree and live_fp is None:
-            t = active_task(st)
-            lv = st.get("last_verify") or {}
-            if (t and t.get("verified_fp") and t.get("verified_tree") not in (None, live_tree)) or (
-                    not t and lv.get("fp") and lv.get("tree") != live_tree):
-                live_fp = code_fp(self, live_tree)
-        st["next"] = compute_next(st, self.cfg, live_tree, live_fp, running_job(self.repo))
+        live_ok = still_verified(self, live_tree) if live_tree else None
+        st["next"] = compute_next(st, self.cfg, live_tree, live_ok, running_job(self.repo))
         st["anchor"] = anchor_block(st)
         self.repo.dir.mkdir(parents=True, exist_ok=True)
         if self.state_path.exists():
@@ -664,17 +663,77 @@ def is_doc(path, cfg):
     return match_any(path, cfg.get("doc_globs")) and not is_test(path, cfg)
 
 
-def verified_docs_since(store, t, cur_tree):
-    """None if the task is not verified on these files. Otherwise the documentation files changed since its verify
-    (empty if nothing changed): edits to docs no check reads leave the verification valid."""
+# Commands that may read source as text, so that a comment changes what they check. Broad on purpose: a false
+# match only costs a re-verify. `cov` must not follow a letter, or unittest's `discover` would match.
+SOURCE_TEXT_RE = re.compile(r"lint|flake|format|fmt|style|mypy|pyright|pytype|pyre|black|isort|yapf|bandit|vulture|"
+                            r"ruff|pycodestyle|pyflakes|pydocstyle|interrogate|doctest|(?<![a-z])cov|"
+                            r"(?<![\w.])(?:grep|egrep|fgrep|rg|ag|ack|awk|sed|diff|cmp|wc|cat|head|tail|git|md5sum|"
+                            r"sha\d*sum)(?![\w.])", re.I)
+
+
+def same_syntax(a, b, lines=False):
+    """True when two versions of a Python file parse to the same syntax tree, docstrings included: they differ only
+    in comments or layout. With `lines`, every node must also keep its line number (warnings and tracebacks print
+    line numbers, which a golden output would compare)."""
+    try:
+        ta, tb = ast.parse(a), ast.parse(b)
+    except (SyntaxError, ValueError, TypeError):
+        return False
+    if lines and [getattr(n, "lineno", 0) for n in ast.walk(ta)] != [getattr(n, "lineno", 0) for n in ast.walk(tb)]:
+        return False
+    return ast.dump(ta) == ast.dump(tb)
+
+
+def unseen_changes(store, old, new):
+    """The files that differ between snapshots `old` and `new` when no check can see the difference: documentation
+    that no check reads, and comments or layout in Python files when no check reads source as text (a linter,
+    grep). Locked and protected tests and file-mode changes always count; with goldens, so do moved lines.
+    Otherwise None."""
+    repo, st = store.repo, store.st
+    changes = tree_changes(repo, old, new)
+    files = tree_entries(repo, new)
+    inert = inert_docs(store, new, files)
+    code = [(s_, p) for s_, p in changes if p not in inert]
+    if code:
+        cmds = step_commands(st, store.cfg)
+        guarded = set(st.get("protected") or {}) | set((active_task(st) or {}).get("locked") or {})
+        before = tree_entries(repo, old)
+        if any(s_ != "M" or not p.endswith(".py") or p in guarded or before.get(p, (0,))[0] != files[p][0]
+               for s_, p in code) or any(
+                SOURCE_TEXT_RE.search(c) or any(w.rsplit("/", 1)[-1].lower() in DOC_TOOLS for w in verify_tokens(c))
+                for c in cmds):
+            return None
+        keep_lines = bool(st.get("goldens"))
+        if not all(same_syntax(blob_text(repo, old, p), blob_text(repo, new, p), keep_lines) for _, p in code):
+            return None
+    return [p for _, p in changes]
+
+
+def verified_changes_since(store, t, cur_tree):
+    """None if the task is not verified on these files. Otherwise the files changed since its verify that no check
+    can see (empty if nothing changed)."""
     vt = t.get("verified_tree")
     if not vt:
         return None
     if vt == cur_tree:
         return []
-    if not t.get("verified_fp") or code_fp(store, cur_tree) != t["verified_fp"]:
-        return None
-    return [p for _, p in tree_changes(store.repo, vt, cur_tree)]
+    if t.get("verified_fp") and code_fp(store, cur_tree) == t["verified_fp"]:
+        return [p for _, p in tree_changes(store.repo, vt, cur_tree)]
+    return unseen_changes(store, vt, cur_tree)
+
+
+def still_verified(store, live_tree):
+    """Whether the last verify still holds on snapshot `live_tree`: the active task's verify, or with no active task
+    the final one."""
+    t = active_task(store.st)
+    if t:
+        return verified_changes_since(store, t, live_tree) is not None
+    lv = store.st.get("last_verify") or {}
+    if not lv.get("tree"):
+        return False
+    if lv["tree"] == live_tree or (lv.get("fp") and code_fp(store, live_tree) == lv["fp"]):
+        return True
+    return unseen_changes(store, lv["tree"], live_tree) is not None
 
 
 def is_locked(t):
@@ -698,14 +757,27 @@ def add_review(st, task, kind, msg):
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 
+def _dotted(name, where):
+    return where if where.endswith("." + name) else where + "." + name
+
+
+# (pattern, match -> test id; None takes group 1): the failing-test lines of the runners sci knows.
 FAIL_RES = [
     (re.compile(r"^(?:FAILED|ERROR)\s+(?!\()(\S+?)(?:\s+-\s.*)?\s*$"), None),  # pytest short summary
     (re.compile(r"^(\S+::\S+?)\s+(?:FAILED|ERROR)\b"), None),                 # pytest -v
-    (re.compile(r"^(?:FAIL|ERROR):\s+(\w+)\s+\(([\w.]+)\)"), "unittest"),     # unittest
+    (re.compile(r"^(?:FAIL|ERROR):\s+(\w+)\s+\(([\w.]+)\)"), lambda m: _dotted(m.group(1), m.group(2))),  # unittest
     (re.compile(r"^\s*--- FAIL:\s+(\S+)"), None),                             # go test
     (re.compile(r"^test\s+(\S+)\s+\.\.\.\s+FAILED\s*$"), None),               # cargo test
     (re.compile(r"^\s*\d+/\d+\s+Test\s+#\d+:\s+(\S+)\s+\.*\**\s*(?:Failed|Exception|Timeout|SEGFAULT)"), None),
     (re.compile(r"^\s*\d+\s+-\s+(\S+)\s+\((?:Failed|Timeout|SEGFAULT|Subprocess aborted|Exception|Not Run)\)"), None),
+    (re.compile(r"^\s*FAIL\s+(\S+\.[cm]?[jt]sx?)(?:\s|$)"), None),             # jest, vitest (file)
+    (re.compile(r"^\[ERROR\]\s+(?:(\w+)\(([\w$.]+)\)|([\w$.]+))\s+(?:--\s+)?Time elapsed:.*<<<\s*(?:FAILURE|ERROR)!"),
+     lambda m: m.group(3) or _dotted(m.group(1), m.group(2))),                     # maven surefire
+    (re.compile(r"^\s*([\w$]+(?:\.[\w$]+)+|[\w$]*(?:Test|Spec|IT)\w*)\s+>\s+(\w+)(?:\(\))?\s+FAILED\s*$"),
+     lambda m: m.group(1) + "." + m.group(2)),                                     # gradle
+    (re.compile(r"^\s*Failed\s+([\w`<>+]+(?:\.[\w`<>+]+)+)(?:\(.*\))?\s+\[[\d.]+\s*m?s\]"), None),  # dotnet test
+    (re.compile(r"^rspec\s+(\./\S+?:\d+)\s+#"), None),                            # rspec
+    (re.compile(r"^\d+\)\s+([\w\\]*Test\w*::\w+)"), None),                       # phpunit
 ]
 
 SUMMARY_RES = [
@@ -715,6 +787,12 @@ SUMMARY_RES = [
     re.compile(r"^(test result: .*)$"),
     re.compile(r"^(\d+% tests passed, \d+ tests failed out of \d+)"),
     re.compile(r"^(Tests?:\s+.*\b(?:passed|failed)\b.*)$"),
+    re.compile(r"^(Tests\s{2,}.*\b(?:passed|failed)\b.*)$"),
+    re.compile(r"^(?:\[\w+\]\s+)?(Tests run: \d+, Failures: \d+, Errors: \d+, Skipped: \d+)\s*$"),
+    re.compile(r"^(\d+ tests? completed, \d+ failed.*)$"),
+    re.compile(r"^((?:Passed|Failed)!\s+-\s+Failed:.*)$"),
+    re.compile(r"^(\d+ examples?, \d+ failures?.*)$"),
+    re.compile(r"^(Tests: \d+, Assertions: \d+.*)$"),
 ]
 
 KEY_RE = re.compile(r"^E\s{2,}\S|\b\w*(?:Error|Exception)\b|Traceback \(most recent|panicked at|"
@@ -749,15 +827,11 @@ def read_log_lines(path, max_bytes=40 * 1024 * 1024):
 def extract_failures(lines):
     seen, out = set(), []
     for ln in lines:
-        for rx, kind in FAIL_RES:
+        for rx, to_id in FAIL_RES:
             m = rx.match(ln)
             if not m:
                 continue
-            if kind == "unittest":
-                name, where = m.group(1), m.group(2)
-                fid = where if where.endswith("." + name) else where + "." + name
-            else:
-                fid = m.group(1)
+            fid = to_id(m) if to_id else m.group(1)
             if fid not in seen:
                 seen.add(fid)
                 out.append(fid)
@@ -981,9 +1055,11 @@ SKIP_RE = re.compile(
     r"@unittest\.(?:skip|skipIf|skipUnless|expectedFailure)\b|\bself\.skipTest\s*\(|"
     r"\braise\s+(?:unittest\.)?SkipTest\b|\b(?:it|describe|test)\.(?:skip|todo)\s*\(|"
     r"\bx(?:it|describe|test)\s*\(|#\[ignore\]|\bt\.Skip(?:Now|f)?\s*\(|@test_skip\b|"
-    r"@test_broken\b|@Disabled\b|@Ignore\b|\bGTEST_SKIP\b|\bDISABLED_\w+")
-ASSERT_RE = re.compile(r"\bassert\w*|\bexpect\s*\(|\bASSERT_\w+|\bEXPECT_\w+|@test\b|\bisapprox\b|"
-                       r"\bcheck_close\b|\ballclose\b|\bisclose\b|\bapprox\s*\(")
+    r"@test_broken\b|@Disabled\b|@Ignore\b|\bGTEST_SKIP\b|\bDISABLED_\w+|\bSkip\s*=|\[Ignore\b|"
+    r"markTest(?:Skipped|Incomplete)\s*\(|\b(?:it|describe|test|context)\.only\s*\(|\bf(?:it|describe)\s*\(")
+ASSERT_RE = re.compile(r"\b[aA]ssert\w*|\bexpect\s*\(|\bASSERT_\w+|\bEXPECT_\w+|@test\b|\bisapprox\b|"
+                       r"\bcheck_close\b|\ballclose\b|\bisclose\b|\bapprox\s*\(|\bshould\b|"
+                       r"\bt\.(?:Error|Errorf|Fatal|Fatalf|Fail|FailNow)\s*\(")
 TRIVIAL_RE = re.compile(r"^\s*(?:assert\s+(?:True|1)\s*(?:#.*)?$|self\.assert(?:True|_)\(\s*(?:True|1)\s*\)|"
                         r"expect\(\s*true\s*\)|@test\s+true\b)")
 TOL_RE = re.compile(r"\b(rtol|atol|rel_tol|abs_tol|rel|abs|tol|tolerance|eps|epsilon|delta|places|decimal|"
@@ -1240,8 +1316,9 @@ def guard_fix_hint(viols):
         if p and p not in files:
             files.append(p)
     target = " ".join(files[:4]) or "<file>"
-    return ("Undo it: `.sci/sci restore --paths %s`. Only if the test itself is wrong: "
-            "`.sci/sci unlock %s --reason \"<why>\"` (flagged for human review)." % (target, target))
+    return ("Undo it: `.sci/sci restore --paths %s`. If the test has to change because it is wrong or must follow "
+            "an intended change of this task (a new signature, a renamed function): `.sci/sci unlock %s --reason "
+            "\"<why>\"` (listed for human review)." % (target, target))
 
 
 # --------------------------------------------------------------------------- change-aware verification
@@ -1575,7 +1652,7 @@ def parse_test_cmd(cmd):
     else:
         return None
     rest = toks[i:]
-    spec.update({"targets": [], "discover": None, "narrow": False, "stop": False, "unknown": False})
+    spec.update({"targets": [], "raw": [], "discover": None, "narrow": False, "stop": False, "unknown": False})
     j = 0
     if spec["kind"] == "unittest":
         disc = bool(rest) and rest[0] == "discover"
@@ -1623,6 +1700,7 @@ def parse_test_cmd(cmd):
             break
         else:
             spec["targets"].append(a.split("::", 1)[0].split("[", 1)[0])
+            spec["raw"].append(a)
         j += 1
     return spec
 
@@ -1751,12 +1829,153 @@ def suite_covers(suite, cmd, files, ini, baseline):
     return tf
 
 
+def narrow_suite(cmd, failing, files):
+    """A command that reruns only the `failing` tests of suite `cmd` (pytest node ids, or unittest ids that import
+    from the repo root), or None when sci cannot build one that selects exactly those tests."""
+    spec = parse_test_cmd(cmd)
+    toks = cmd_words(cmd)
+    if not spec or spec["unknown"] or not failing or len(failing) > 40:
+        return None
+    if spec["kind"] == "pytest":
+        if not all("::" in f and f.split("::", 1)[0] in files for f in failing):
+            return None
+        head = [w for w in toks if w not in spec["raw"]]
+    else:
+        ids = []
+        for f in failing:
+            parts = f.split(".")
+            if parts[-1] in ("setUpClass", "tearDownClass", "setUpModule", "tearDownModule"):
+                parts = parts[:-1]  # the fixture is not a test; its class or module is
+            if not any("/".join(parts[:k]) + ".py" in files for k in range(len(parts), 0, -1)):
+                return None
+            if ".".join(parts) not in ids:
+                ids.append(".".join(parts))
+        head, failing = toks[:toks.index("-m") + 2], ids
+    return " ".join(shlex.quote(w) for w in head + list(failing))
+
+
+# Test runners whose checks are usually the suite's command plus a selection, as in `cargo test` and
+# `cargo test energy`. Only selections that cannot reach a test the suite leaves out are listed: cargo's --test
+# and --lib can run a target that has `test = false`, and Maven's -Dtest overrides the suite's excludes.
+# start: the words that begin the command. value: selecting flags that take a value. flags: selecting flags
+# without one. words: what a bare word is (a test-name or path filter, a go package that a suite pattern must
+# cover, or None: an ordinary argument). quiet/quietv: flags a check may add that change neither which tests
+# run nor how they build (quietv ones take a value).
+# skip: flags that leave tests out of a suite.
+RUNNERS = [
+    {"start": [["cargo", "test"]], "value": set(), "flags": {"--", "--exact"}, "words": "filter",
+     "quiet": {"-q", "--quiet", "-v", "--verbose", "--nocapture", "--show-output"}, "quietv": set(),
+     "skip": {"--exclude", "--skip"}},
+    {"start": [["go", "test"]], "value": {"-run"}, "flags": set(), "words": "package",
+     "quiet": {"-v", "-count", "-json"}, "quietv": set(), "skip": {"-skip"}},
+    {"start": [["ctest"]], "value": {"-R", "--tests-regex"}, "flags": set(), "words": None,
+     "quiet": {"-V", "-VV", "--verbose", "--extra-verbose", "--output-on-failure", "-Q", "--quiet"},
+     "quietv": {"-j", "--parallel"},
+     "skip": {"-E", "--exclude-regex", "-L", "--label-regex", "-LE", "--label-exclude", "-I", "--tests-information",
+              "-U", "--union", "-FA", "--fixture-exclude-any", "--rerun-failed"}},
+    {"start": [[l, "jest"] for l in ("npx", "yarn", "pnpm", "bunx")] + [["jest"], ["pnpm", "exec", "jest"]],
+     "value": {"-t", "--testNamePattern", "--testPathPattern", "--testPathPatterns"}, "flags": set(),
+     "words": "filter", "quiet": {"--ci", "--silent", "--verbose"}, "quietv": set(),
+     "skip": {"-o", "--onlyChanged", "--changedSince", "--findRelatedTests", "--lastCommit", "-f", "--onlyFailures",
+              "--testPathIgnorePatterns", "--shard"}},
+    {"start": [[l, "vitest", "run"] for l in ("npx", "yarn", "pnpm", "bunx")] + [["vitest", "run"]],
+     "value": {"-t", "--testNamePattern"}, "flags": set(), "words": "filter", "quiet": {"--silent", "--reporter"},
+     "quietv": set(), "skip": {"--changed", "--related", "--exclude", "--shard"}},
+    {"start": [["dotnet", "test"]], "value": {"--filter"}, "flags": set(), "words": None,
+     "quiet": {"--nologo"}, "quietv": {"-v", "--verbosity"}, "skip": set()},
+    {"start": [["gradle"], ["./gradlew"], ["gradlew"], ["gradlew.bat"]], "value": {"--tests"}, "flags": set(),
+     "words": None, "quiet": {"-q", "--quiet", "-i", "--info", "--console"}, "quietv": set(),
+     "skip": {"-x", "--exclude-task"}},
+]
+
+
+def runner_args(r, words):
+    """A runner's arguments: sel (what picks tests), pkgs (go packages), other (options the suite must share) and
+    bad (a flag that leaves tests out). Flags that change neither which tests run nor how they build are dropped."""
+    res, i = {"sel": [], "pkgs": [], "other": [], "bad": False}, 0
+    while i < len(words):
+        w = words[i]
+        key = w.split("=", 1)[0]
+        if key in r["value"]:
+            if "=" in w:
+                res["sel"].append(w.split("=", 1)[1])
+            elif i + 1 < len(words):
+                res["sel"].append(words[i + 1])
+                i += 1
+            else:
+                res["bad"] = True
+        elif w in r["flags"]:
+            res["sel"].append("")
+        elif key in r["quiet"]:
+            pass
+        elif w in r["quietv"]:
+            i += 1
+        elif key in r["skip"]:
+            res["bad"] = True
+        elif not w.startswith("-") and r["words"] == "filter":
+            res["sel"].append(w)
+        elif not w.startswith("-") and r["words"] == "package":
+            res["pkgs"].append(w)
+        else:
+            res["other"].append(w)
+        i += 1
+    return res
+
+
+def go_covers(patterns, pkg, files):
+    """Whether `go test PATTERNS` tests package `pkg`. A `/...` pattern skips vendor/ and testdata/, directories
+    whose names start with . or _, and nested modules (directories with their own go.mod)."""
+    if pkg in patterns:
+        return True
+    path = pkg[:-4] if pkg.endswith("/...") else pkg
+    if path != "." and not path.startswith("./"):
+        return False
+    parts = [x for x in path[2:].split("/") if x]
+    if any(x in ("vendor", "testdata") or x[0] in "._" for x in parts) or any(
+            "/".join(parts[:k]) + "/go.mod" in files for k in range(1, len(parts) + 1)):
+        return False
+    for pat in patterns:
+        base = pat[:-4] if pat.endswith("/...") else None
+        if base == "." or (base and (path == base or path.startswith(base + "/"))):
+            return True
+    return False
+
+
+def runner_covers(suite_cmd, cmd, known, files=()):
+    """The selection of check `cmd` (test-name filters, paths, packages) when the suite surely runs every test it
+    runs: the same runner with the same options, a suite that selects nothing and a check that only narrows it.
+    None otherwise, and whenever the baseline has failures, because a runner may stop at a failing target and
+    never run the tests after it."""
+    if known:
+        return None
+    ts, tt = cmd_words(suite_cmd), cmd_words(cmd)
+    if not ts or not tt:
+        return None
+    for r in RUNNERS:
+        start = next((x for x in r["start"] if ts[:len(x)] == x), None)
+        if start:
+            break
+    else:
+        return None
+    if tt[:len(start)] != start:
+        return None
+    a, b = runner_args(r, ts[len(start):]), runner_args(r, tt[len(start):])
+    if a["bad"] or b["bad"] or a["sel"] or a["other"] != b["other"]:
+        return None
+    if r["words"] == "package" and not all(go_covers(a["pkgs"] or ["."], x, files) for x in b["pkgs"] or ["."]):
+        return None
+    return [k for k in b["sel"] if k] + b["pkgs"]
+
+
 def blame_tasks(covered, failures):
-    """[(task id, failing test ids)] for covered earlier tasks whose test files are among the suite's failures."""
+    """[(task id, failing test ids)] for covered earlier tasks whose tests are among the suite's failures: Python
+    test files by module name, other runners by the names in their selection (a check with none owns them all)."""
     res = []
-    for tid, tf in covered:
+    for tid, tf, keys in covered:
         stems = _stems(tf)
-        mine = [f for f in failures if stems & _id_parts(f)]
+        words = [w for k in keys for w in re.split(r"[|,#+*()^$\s~=!&]+", k) if len(w) >= 3]  # shorter ones match all
+        mine = [f for f in failures if stems & _id_parts(f) or any(w in f for w in words)
+                or not (tf or keys)]
         if mine:
             res.append((tid, mine))
     return res
@@ -1764,7 +1983,7 @@ def blame_tasks(covered, failures):
 
 # --------------------------------------------------------------------------- next step / anchor / handoff
 
-def compute_next(st, cfg, live_tree=None, live_fp=None, job=None):
+def compute_next(st, cfg, live_tree=None, live_ok=None, job=None):
     if st.get("paused"):
         return "Harness paused (`.sci/sci unpause` to resume)."
     if job:
@@ -1799,19 +2018,25 @@ def compute_next(st, cfg, live_tree=None, live_fp=None, job=None):
                 return "Check passes. Lock the acceptance tests: `.sci/sci lock`, then run `.sci/sci verify`."
             return ("If the check fails for the expected reason (feature missing, not a broken test), lock the "
                     "acceptance tests: `.sci/sci lock`, then implement in small steps.")
+        p = t.get("pending")  # the step the last verify failed on (set_pending)
         if lc is None or not lc.get("ok"):
-            g = (lc or {}).get("golden")  # set when verify failed on this golden
+            g = p["name"] if p and p["kind"] == "golden" else None
             if g and g in st["goldens"] and not (st["goldens"][g].get("last") or {}).get("ok"):
-                return ('Golden %s changed. Not intended: fix the code, then `.sci/sci check`. Intended (bug fix, better '
-                        'scheme): `.sci/sci golden update %s --reason "..."`, then `.sci/sci verify`. Strike %d/3.'
-                        % (g, g, t.get("strikes", 0)))
-            if g:
+                return ('Golden %s changed. Not intended: fix the code, then `.sci/sci check` (it reruns the golden). '
+                        'Intended (bug fix, better method): `.sci/sci golden update %s --reason "..."`, then '
+                        '`.sci/sci verify`. Strike %d/3.' % (g, g, t.get("strikes", 0)))
+            if g and lc and (lc.get("by_verify") or lc.get("pending_failed")):
                 return "Golden %s is up to date. Run `.sci/sci verify` again." % g
+            if p:
+                return ("Fix the code (not the tests), then `.sci/sci check`; it also reruns %s, which failed the "
+                        "last verify. Strike %d/3." % (p["label"], t.get("strikes", 0)))
             return "Fix the code (not the tests), then `.sci/sci check`. Strike %d/3." % t.get("strikes", 0)
+        if p and p.get("passed_tree") != lc.get("tree"):
+            return "Run `.sci/sci check`: it also reruns %s, which failed the last verify." % p["label"]
         vt = t.get("verified_tree")
         if not vt:
             return "Checks pass. Run `.sci/sci verify` (full gate)."
-        if live_tree and live_tree != vt and not (live_fp and live_fp == t.get("verified_fp")):
+        if live_tree and live_tree != vt and not live_ok:
             return "Files changed since the last verify. Run `.sci/sci verify` again."
         if not t.get("verified_full"):
             return "Quick verify passed. Run the full `.sci/sci verify` before `.sci/sci done`."
@@ -1823,7 +2048,7 @@ def compute_next(st, cfg, live_tree=None, live_fp=None, job=None):
         lv = st.get("last_verify") or {}
         if (lv.get("ok") and not lv.get("quick") and not lv.get("task")
                 and (lv.get("t") or "") >= max(x.get("done_at") or "" for x in tasks)
-                and (live_tree is None or lv.get("tree") in (None, live_tree) or (live_fp and lv.get("fp") == live_fp))):
+                and (live_tree is None or lv.get("tree") in (None, live_tree) or live_ok)):
             return ("All tasks done and the final verify passed. Run `.sci/sci report` and give the human the report, "
                     "including every NEEDS YOUR REVIEW item.")
         return "All tasks done. Run `.sci/sci verify` (final regression), then report to the human with `.sci/sci report`."
@@ -2803,10 +3028,8 @@ def cmd_resume(args):
             store.log("RESUME", task=st.get("active"), msg="session %d" % st["session"])
             store.save(live_tree)
     job_lines, live = job_state_lines(repo)
-    live_fp = None
-    if live_tree and t and t.get("verified_fp") and t.get("verified_tree") not in (None, live_tree):
-        live_fp = code_fp(store, live_tree)
-    st["next"] = compute_next(st, cfg, live_tree, live_fp, live)
+    live_ok = still_verified(store, live_tree) if live_tree else None
+    st["next"] = compute_next(st, cfg, live_tree, live_ok, live)
     if not held:
         print("note: another sci command is saving its state; showing the last saved state.")
     if args.brief:
@@ -2849,7 +3072,7 @@ def cmd_resume(args):
         lv = "never"
         if t.get("verified_tree"):
             lv = ("on current files" if live_tree == t["verified_tree"] else
-                  "on current code (only docs changed since)" if live_fp and live_fp == t.get("verified_fp") else
+                  "on current code (only docs, comments or layout changed since)" if live_ok else
                   "STALE (files changed since)")
         L.append("  last check: %s | strikes %d/3 | verify: %s" % (check_state(t), t.get("strikes", 0), lv))
         if t.get("last_check") and not t["last_check"].get("ok") and t["last_check"].get("failing"):
@@ -3010,7 +3233,7 @@ def cmd_task_start(args):
         t.update({"status": "active", "started": now_iso(), "start_tree": tree, "start_head": head_sha(repo),
                   "preexisting_untracked": untracked_list(repo, cfg), "strikes": 0, "stop": None, "stop_cycles": 0,
                   "last_check": None, "verified_tree": None, "verified_full": False, "last_green_tree": None,
-                  "locked": {}, "lock_none": None, "red": False})
+                  "locked": {}, "lock_none": None, "red": False, "pending": None})
         st["active"] = t["id"]
         st["violations"] = []
         set_ref(repo, t["id"] + "/start", tree, "sci %s start" % t["id"])
@@ -3157,11 +3380,13 @@ def cmd_task_scope(args):
     return 0
 
 
-SRC_EXT_RE = re.compile(r"\.(?:py|pyx|jl|[rR]|m|sh|bash|c|cc|cpp|cxx|h|hpp|cu|f|for|f90|F90|f95|rs|go|js|mjs|ts|"
-                        r"java|kt|scala|rb|pl|lua|ipynb)$")
+SRC_EXT_RE = re.compile(r"\.(?:py|pyx|jl|[rR]|m|sh|bash|c|cc|cpp|cxx|h|hpp|cu|f|for|f90|F90|f95|rs|go|js|mjs|cjs|"
+                        r"jsx|ts|tsx|mts|cts|vue|svelte|java|kt|kts|scala|cs|fs|swift|dart|php|ex|exs|hs|ml|zig|rb|"
+                        r"pl|lua|ipynb)$")
 RUNNER_RE = re.compile(r"(?:^|[\s;&|(/])(?:pytest|py\.test|unittest|nose2|nosetests|tox|nox|ctest|jest|vitest|mocha|"
                        r"rspec|phpunit|runtests|testthat|go\s+test|cargo\s+(?:test|nextest)|make\s+(?:test|check)|"
-                       r"(?:npm|yarn|pnpm)\s+(?:run\s+)?test|meson\s+test|dotnet\s+test|mvn\s+test|gradlew?\s+test)\b")
+                       r"(?:npm|yarn|pnpm)\s+(?:run\s+)?test|meson\s+test|dotnet\s+test|mvnw?\s+test|gradlew?\s+test|"
+                       r"(?:bun|deno|swift|mix|cabal|stack)\s+test|zig\s+build\s+test|dune\s+(?:test|runtest))\b")
 
 
 def verify_tokens(cmd):
@@ -3344,8 +3569,9 @@ def run_build(store, cmd):
     return r, report_run(store.repo, store.cfg, r, "build", quiet_pass=True)
 
 
-def record_attempt(store, t, ok, tree, run):
-    """Update strikes. Returns lines to print."""
+def record_attempt(store, t, ok, tree, run, guard_only=False):
+    """Update strikes. Once the tests are locked, a failure is a strike when the code changed since the last attempt,
+    unless only the guard failed (`guard_only`: the tests passed). Returns lines to print."""
     repo, st = store.repo, store.st
     msgs = []
     prev = t.get("last_check")
@@ -3358,7 +3584,7 @@ def record_attempt(store, t, ok, tree, run):
             t["stop"] = None
             store.log("STOP_CLEARED", task=t["id"], msg="check passed")
             msgs.append("STOP cleared: the check passes now.")
-    elif is_locked(t) and changed:
+    elif is_locked(t) and changed and not guard_only:
         t["strikes"] = int(t.get("strikes") or 0) + 1
         base = t.get("last_green_tree") or t["start_tree"]
         p = save_attempt_patch(repo, t, base, tree, "strike%d-%d" % (t["strikes"], int(time.time())))
@@ -3426,8 +3652,13 @@ def cmd_check(args):
         env = env_stamp(repo.root, cmd)
         viol = run_guard(repo, st, cfg, t, cur_tree)
         build = build_needed(store, cur_tree)
+        pend = None if args.cmd else t.get("pending")
+        if pend and pend["kind"] == "golden" and pend.get("name") not in st["goldens"]:
+            pend = None
+        if pend:
+            pfp, penv = step_fp(store, cur_tree, pend["full"]), env_stamp(repo.root, pend["full"])
     # The command runs without the state lock, so note/hyp/now keep working meanwhile.
-    lines, r, built, ok_b, ref = [], None, None, True, cur_tree
+    lines, r, built, ok_b, ref, p_ok = [], None, None, True, cur_tree, None
     if build:
         built, blines = run_build(store, build)
         ok_b = built.ok
@@ -3436,9 +3667,13 @@ def cmd_check(args):
     if not ok_b:
         lines.append("Build failed; fix the build first.")
     else:
-        job_step("check " + tid, 1, 1, (st.get("durations") or {}).get("cmd:" + cmd))
+        job_step("check " + tid, 1, 2 if pend else 1, (st.get("durations") or {}).get("cmd:" + cmd))
         r = run_cmd(store, cmd, "check", tid, int(cfg["check_timeout"]))
         lines += report_run(repo, cfg, r, "check " + tid)
+        if pend and r.ok:
+            job_step(pend["label"], 2, 2, (st.get("durations") or {}).get(pend["key"]))
+            p_ok, plines, p_last, p_secs, p_whole = run_pending(store, pend, tid)
+            lines += plines
     edited = edited_during(repo, cfg, ref) if r is not None else []
     with state_lock(repo):
         st, cfg = store.load()
@@ -3449,18 +3684,30 @@ def cmd_check(args):
                 st["last_build_tree"] = cur_tree
         if r is not None and not edited:
             note_result(st, "cmd:" + cmd, cmd_fp, r.ok, r.secs, env)
+        if p_ok is not None and not edited:
+            cur = t.get("pending")
+            if cur and cur.get("key") == pend["key"]:
+                cur["passed_tree"] = cur_tree if p_ok else None
+                if p_whole:
+                    cur.update(cmd=cur["full"], narrow=False, whole=True)
+            if p_last is not None and pend["name"] in st["goldens"]:
+                st["goldens"][pend["name"]]["last"] = p_last
+            if p_ok and pend["kind"] != "golden" and not pend["narrow"]:
+                note_result(st, pend["key"], pfp, True, p_secs, penv)
         st["violations"] = viol
-        ok = bool(r is not None and r.ok) and not viol and not edited
+        ok = bool(r is not None and r.ok) and p_ok is not False and not viol and not edited
         if viol and r is not None and r.ok:
             lines.append("CHECK COUNTS AS FAIL: the tests pass, but protected/locked tests were changed (see GUARD).")
         if edited:
             lines.append(edited_text("THE CHECK", edited))
         else:
-            lines += record_attempt(store, t, ok, cur_tree, r)
+            lines += record_attempt(store, t, ok, cur_tree, r,
+                                    guard_only=bool(viol) and r is not None and r.ok and p_ok is not False)
+            t["last_check"]["pending_failed"] = p_ok is False
         warn = scope_warnings(store, t, cur_tree)
         store.log("CHECK", task=tid, msg="PASS" if ok else "FAIL", run=r.n if r else None, cmd=cmd,
                   strikes=t["strikes"])
-        store.save(cur_tree, fp)
+        store.save(cur_tree)
     if t.get("stop"):
         print("!!! STOP is active for %s (details at the end of this output)." % tid)
     out(lines)
@@ -3489,7 +3736,7 @@ def verify_plan(store, t, tree, args):
     if not args.quick:
         suite_cmd = (cfg.get("regress_cmd") or "").strip()
         suite = parse_test_cmd(suite_cmd) if suite_cmd else None
-        files = tree_entries(store.repo, tree) if suite else {}
+        files = tree_entries(store.repo, tree) if suite_cmd else {}
         ini = pytest_ini(store.repo.root) if suite and suite["kind"] == "pytest" else {}
         known = (st.get("baseline") or {}).get("failures") or []
         seen = set(s["cmd"] for s in steps)
@@ -3498,8 +3745,9 @@ def verify_plan(store, t, tree, args):
                 continue
             seen.add(d["verify"])
             tf = suite_covers(suite, d["verify"], files, ini, known) if suite else None
-            if tf:
-                covered.append((d["id"], tf))
+            keys = runner_covers(suite_cmd, d["verify"], known, files) if suite_cmd and not suite else None
+            if tf or keys is not None:
+                covered.append((d["id"], tf or [], keys or []))
             else:
                 steps.append({"label": "regression " + d["id"], "kind": "done", "cmd": d["verify"],
                               "key": "cmd:" + d["verify"], "tid": d["id"]})
@@ -3534,14 +3782,58 @@ def judge_suite(store, r, covered):
     if new:
         lines.append("NEW FAILURES (not in baseline): " + ", ".join(new[:12]))
         for tid, fails in blame_tasks(covered, new):
-            lines.append("REGRESSION: your change broke %s's tests (%s). Fix the code; do not edit %s's tests."
-                         % (tid, ", ".join(fails[:4]), tid))
+            lines.append("REGRESSION: your change broke %s's tests (%s). Fix the code. Change %s's tests only if "
+                         "they must follow an intended change of this task (`.sci/sci unlock <file> --reason "
+                         "\"...\"`)." % (tid, ", ".join(fails[:4]), tid))
     elif not st.get("baseline"):
         lines.append("No baseline recorded. If these failures existed before your work, record them "
                      "on a clean checkout with `.sci/sci baseline` (ask the human if unsure).")
     else:
         lines.append("Could not attribute the failure to known baseline tests; treat it as yours.")
     return False, lines
+
+
+def set_pending(store, t, s, tree):
+    """Remember the verify step that failed (an earlier task's check, a golden or the suite) so that `check` reruns
+    it until it passes. A failing suite is rerun as just its failing tests when narrow_suite can select them,
+    unless those passed alone on this very code: then they depend on other tests and only the whole suite tells.
+    Returns lines to print."""
+    if s["kind"] == "task":
+        return []
+    prev = t.get("pending") or {}
+    same = prev.get("key") == s["key"]
+    whole = s["kind"] == "suite" and same and bool(prev.get("whole") or (prev.get("narrow")
+                                                                         and prev.get("passed_tree") == tree))
+    narrow = None
+    if s["kind"] == "suite" and not whole:
+        narrow = narrow_suite(s["cmd"], s.get("new") or [], tree_entries(store.repo, tree))
+    t["pending"] = {"key": s["key"], "kind": s["kind"], "label": s["label"], "name": s.get("name"),
+                    "cmd": narrow or s["cmd"], "full": s["cmd"], "narrow": bool(narrow), "whole": whole,
+                    "tree": tree, "passed_tree": None}
+    if whole and not prev.get("whole"):
+        return ["The failing tests pass when they run alone but fail in the full suite, so they depend on other "
+                "tests (shared state, files or processes left behind). `.sci/sci check` now reruns the whole suite."]
+    return []
+
+
+def run_pending(store, p, tid):
+    """Rerun the step that failed the last verify. Returns (ok, lines, golden record or None, seconds, whole):
+    `whole` is True when a narrowed rerun failed without naming a test, so only the whole suite can tell."""
+    if p["kind"] == "golden":
+        return golden_check_one(store, p["name"]) + (False,)
+    r = run_cmd(store, p["cmd"], "check", tid, int(store.cfg["verify_timeout"]))
+    if p["narrow"] and not r.ok and not r.failing:
+        return False, report_run(store.repo, store.cfg, r, p["label"] + " (only the tests that failed)") + [
+            "The rerun of just the failing tests failed without naming a test, so `.sci/sci check` reruns the "
+            "whole suite from now on."], None, r.secs, True
+    if p["kind"] == "suite" and not p["narrow"]:
+        ok, lines = judge_suite(store, r, [])
+    else:
+        label = p["label"] + (" (only the tests that failed)" if p["narrow"] else "")
+        ok, lines = r.ok, report_run(store.repo, store.cfg, r, label, quiet_pass=True)
+        if not ok and p["kind"] == "done":
+            lines.append("REGRESSION: your change still breaks %s." % p["label"].split()[-1])
+    return ok, lines, None, r.secs, False
 
 
 def cmd_verify(args):
@@ -3563,7 +3855,7 @@ def cmd_verify(args):
         for ln in ls:
             print(ln, flush=True)
 
-    ok, failed_golden, results, glast, built, ref = not viol, None, [], {}, None, cur_tree
+    ok, results, glast, built, ref = not viol, [], {}, None, cur_tree
     if viol:
         say(["FAIL guard: " + fmt_viol(v) for v in viol] + ["GUARD FIX: " + guard_fix_hint(viol)])
     if ok and build:
@@ -3582,7 +3874,6 @@ def cmd_verify(args):
         if s["kind"] == "golden":
             s_ok, glines, glast[s["name"]], secs = golden_check_one(store, s["name"])
             say(glines)
-            failed_golden = None if s_ok else s["name"]
         else:
             r = run_cmd(store, s["cmd"], "regress" if s["kind"] == "suite" else "verify", tid,
                         int(cfg["verify_timeout"]))
@@ -3590,6 +3881,8 @@ def cmd_verify(args):
             if s["kind"] == "suite":
                 s_ok, slines = judge_suite(store, r, covered)
                 say(slines)
+                known = set((st.get("baseline") or {}).get("failures") or [])
+                s["new"] = [f for f in r.failing if f not in known]
             elif r.ok:
                 s_ok = True
                 say(report_run(repo, cfg, r, s["label"], quiet_pass=True)[:1])
@@ -3597,7 +3890,8 @@ def cmd_verify(args):
                 s_ok = False
                 say(report_run(repo, cfg, r, s["label"]))
                 if s["kind"] == "done":
-                    say(["REGRESSION: your change broke %s's check. Fix the code; do not edit %s's tests."
+                    say(["REGRESSION: your change broke %s's check. Fix the code. Change %s's tests only if they "
+                         "must follow an intended change of this task (`.sci/sci unlock <file> --reason \"...\"`)."
                          % (s["tid"], s["tid"])])
         results.append((s, s_ok, secs))
         if not s_ok:
@@ -3628,20 +3922,23 @@ def cmd_verify(args):
             if ok:
                 t.update({"verified_tree": cur_tree, "verified_fp": fp, "verified_full": not args.quick,
                           "verified_at": now_iso()})
+                if not args.quick:
+                    t["pending"] = None
                 lc = t.get("last_check")
                 if not lc or lc.get("tree") != cur_tree or not lc.get("ok"):
                     record_attempt(store, t, True, cur_tree, None)
             else:
                 t["verified_tree"] = None
                 lines += record_attempt(store, t, False, cur_tree, None) if not viol and not edited else []
-                if failed_golden and not edited:
-                    t["last_check"]["golden"] = failed_golden
+                if results and not results[-1][1] and not viol and not edited:
+                    lines += set_pending(store, t, results[-1][0], cur_tree)
+                    t["last_check"]["by_verify"] = True
         st["last_verify"] = {"t": now_iso(), "ok": ok, "task": tid, "quick": bool(args.quick), "tree": cur_tree,
                              "fp": fp}
         store.log("VERIFY", task=tid, msg="PASS" if ok else "FAIL", quick=bool(args.quick),
                   reused=len([s for s in steps if s["cached"]]), covered=[c[0] for c in covered])
         warn = scope_warnings(store, t, cur_tree) if t else []
-        store.save(cur_tree, fp)
+        store.save(cur_tree)
     out(lines)
     for w in warn:
         print("WARNING: " + w)
@@ -3668,7 +3965,7 @@ def cmd_done(args):
     with locked(store) as (st, cfg):
         t = require_active(st)
         cur_tree, big = snapshot(repo, cfg)
-        doc_only = verified_docs_since(store, t, cur_tree)
+        doc_only = verified_changes_since(store, t, cur_tree)
         if doc_only is None:
             refuse("%s is not verified on the current files." % t["id"],
                    "Run `.sci/sci verify` (it must PASS on exactly these files), then `.sci/sci done -m \"...\"`.")
@@ -3693,7 +3990,8 @@ def cmd_done(args):
                    "Revert them (`.sci/sci restore --paths <file>`), or justify: .sci/sci done -m \"...\" --allow-outside \"<why>\"")
         notes = []
         if doc_only:
-            notes.append("Only documentation changed since verify (%s); the verification still holds."
+            notes.append("Only documentation, comments or layout changed since verify (%s); the verification "
+                         "still holds."
                          % ", ".join(doc_only[:5]))
         dbg, prints = [], []
         for s, p in changes:
@@ -4186,6 +4484,9 @@ def cmd_golden(args):
             if not args.reason or len(args.reason) < 10:
                 refuse("Removing a golden needs --reason (shown to the human).")
             del st["goldens"][name]
+            for x in st["tasks"]:
+                if (x.get("pending") or {}).get("name") == name:
+                    x["pending"] = None
             with contextlib.suppress(OSError):
                 golden_path(repo, name).rename(golden_path(repo, name).with_suffix(".removed.json"))
             add_review(st, st.get("active"), "golden-removed", "%s: %s" % (name, args.reason))
@@ -4517,7 +4818,7 @@ def cmd_purge(args):
     return 0
 
 
-HELP = """sci %s - long-horizon scientific coding harness. State lives in .sci/; run it as .sci/sci <command>.
+HELP = """sci %s - keeps long coding tasks on track. State lives in .sci/; run it as .sci/sci <command>.
 
 START / RECOVER
   resume                          live briefing + NEXT (run after any compaction or when unsure)
@@ -4535,7 +4836,8 @@ UNDERSTAND
   note "fact" [--kind units|code|derivation|decision|env|gotcha|perf]    | note --list | note --drop N
   now "what I am doing + next command"
 WORK
-  check [--cmd "narrower cmd"]    run the active task's verify command (fast loop; counts strikes)
+  check [--cmd "narrower cmd"]    run the active task's verify command, and what the last verify failed on
+                                  (fast loop; counts strikes)
   lock [FILES] | lock --none "why"   lock the acceptance tests (after RED); --none: task has no test file
   verify [--quick] [--fresh]      full gate: task + earlier tasks + goldens + regression suite. Reuses a step
                                   that passed on identical code (docs no test reads do not count); --fresh reruns
@@ -4549,7 +4851,7 @@ DEBUG (required after STOP)
   run "cmd"                       run an experiment from the repo root (PYTHONPATH includes the repo), logged
   hyp add "cause" [--test "cmd"] | hyp refute H1 "evidence" | hyp confirm H1 "evidence" | hyp list [--all]
                                   (--revise changes the verdict of an already resolved hypothesis)
-SCIENCE
+NUMBERS
   golden add NAME --cmd "cmd that prints key numbers" [--rtol 1e-12] [--atol 0] [--filter REGEX]
   golden check [NAME] | golden list | golden update NAME --reason ".." | golden retol NAME --rtol X --reason ".."
   order --h H1 H2 H3 --err E1 E2 E3 [--expect P]   (or --n N1 N2 N3) observed convergence order
@@ -4566,7 +4868,7 @@ def cmd_help(args):
 
 
 def build_parser():
-    p = argparse.ArgumentParser(prog="sci", add_help=True, description="Long-horizon scientific coding harness.")
+    p = argparse.ArgumentParser(prog="sci", add_help=True, description="Keeps long coding tasks on track.")
     p.add_argument("--version", action="version", version="sci " + VERSION)
     sub = p.add_subparsers(dest="cmd")
 

@@ -1,28 +1,27 @@
 ---
 name: sci
 description: >-
-  Durable-memory harness for long-horizon scientific and numerical coding in large codebases
-  (simulations, solvers, numerical methods, physics/engineering/climate/bio models, scientific
-  data pipelines). Use when starting, continuing or resuming multi-step work on such code, after
-  a conversation was summarized or compacted, or when work has lost direction. Keeps the plan,
-  task status, ruled-out causes and codebase notes on disk; enforces locked tests, golden
-  numerical outputs, regression checks, a 3-strike debugging stop and safe undo. Built for small
-  models (Haiku, Gemini Flash, GPT-OSS) and works with any model.
+  Keeps coding agents on track in long, multi-step software work in real codebases: features, bug fixes,
+  refactors, migrations, performance work, and scientific or numerical code, in any language. Use when
+  starting, continuing or resuming multi-step coding work, after a conversation was summarized or compacted,
+  or when work has lost direction. Keeps the plan, task status, test results, ruled-out causes and codebase
+  notes on disk; runs each task's acceptance test, earlier tasks' checks, saved reference outputs and the
+  regression suite before every commit; stops repeated failed fixes; undoes safely. Works with any model.
 license: MIT
 compatibility: >-
-  Needs git and Python 3.8+ (standard library only); any test runner. Linux, macOS and Windows.
+  Needs git and Python 3.8+ (standard library only); any language and test runner. Linux, macOS and Windows.
   Works in any agent that can run shell commands (Claude Code, Codex, Gemini CLI, Antigravity,
   OpenCode, pi, Cursor).
 allowed-tools: Bash Read Write Edit Glob Grep
 metadata:
-  version: "3.2.0"
+  version: "3.3.0"
 ---
 
-# Long-horizon scientific coding
+# Long coding tasks that stay on track
 
-Your memory of this conversation is unreliable: long sessions get summarized and details vanish.
-The truth lives in `.sci/` inside the repository. The tool `.sci/sci` reads it, updates it and
-checks your work. When your memory and `.sci/sci` disagree, believe `.sci/sci`.
+Long sessions get summarized and details vanish. The plan, task status, test results and notes live in
+`.sci/` inside the repository. The tool `.sci/sci` reads and updates them and checks your work. When your
+memory and `.sci/sci` disagree about what passed or what comes next, believe `.sci/sci`.
 
 Run every command from the repository root.
 
@@ -38,18 +37,20 @@ Run every command from the repository root.
   `python3 <this-skill-folder>/scripts/sci.py init --objective "<the user's goal in one line>"`
   (Windows: `py -3` or `python` instead of `python3`. Folder unknown? It is usually
   `~/.local/share/agent-skills/sci`; otherwise `find ~ -path '*/sci/scripts/sci.py' 2>/dev/null | head -1`)
-- Run `.sci/sci resume` again after any summary or compaction, after finishing a task, whenever
-  you are unsure, and at least every ~20 tool calls.
+- Run `.sci/sci resume` again after any summary or compaction, after finishing a task, and whenever you
+  are unsure.
 - Every sci command ends with a `[sci] ... NEXT: ...` line. Read it every time.
 
 ## 2. Rules
 
 1. One task at a time. Change only what the active task needs, inside its scope.
-2. Never weaken tests. Do not edit locked tests, existing assertions, tolerances, seeds or golden
-   values to get a pass. If a test is truly wrong, explain why to the human, or run
+2. Never weaken tests to get a pass: no looser assertions, tolerances or timeouts, no deleted or skipped
+   tests, no edited seeds or golden values. A test that is wrong, or that must follow an intended change of
+   the task (a new signature, a renamed function), may change after
    `.sci/sci unlock <file> --reason "<why>"` (the human reviews it).
-3. No mental math. Every formula, constant, unit conversion, expected value and tolerance comes
-   from a script you ran (`.sci/scratch/` + `.sci/sci run`). Save results:
+3. No guessed numbers. Expected values, constants, tolerances, timeouts, limits and unit conversions that
+   you write into code or tests come from something you ran or a source you cite. A one-liner is enough:
+   `.sci/sci run "python3 -c 'print(0.5 * 0.1 / 340)'"`. Save results that matter:
    `.sci/sci note "<result>" --kind derivation`.
 4. Only `.sci/sci check` and `.sci/sci verify` decide pass or fail. Never claim success without
    their PASS.
@@ -59,16 +60,16 @@ Run every command from the repository root.
    fix only what the evidence supports (section 5).
 7. Keep outputs small. Never print whole large files or full logs. Use `.sci/sci find`, read
    50-150 line slices, `.sci/sci out <run> --grep <pattern>`.
-8. Ask instead of guessing physics, units, boundary conditions or requirements:
+8. Ask instead of guessing requirements, API contracts, units or physics:
    `.sci/sci task block <ID> --reason "<question>"`, then continue with another task.
 
 ## 3. Plan (when there are no tasks)
 
-1. Explore: `.sci/sci map`, then `.sci/sci find <name>` for the functions involved. Read their
-   definitions and tests.
+1. Explore: `.sci/sci map`, then `.sci/sci find <name>` for the code involved. Read its definitions
+   and tests.
 2. Save what you learn so you never search for it again:
    `.sci/sci note "<fact with file:line>" --kind code|units|env|gotcha`
-3. If numerical results could change, capture current behavior first:
+3. If numbers the code prints could change (results, metrics, counts), capture them first:
    `.sci/sci golden add <name> --cmd "<command that prints the key numbers>"` (call the code path
    directly; not a script that a task will edit)
 4. Record the test suite's current state: `.sci/sci baseline` (`verify` reruns that suite and fails
@@ -79,8 +80,15 @@ Run every command from the repository root.
        --scope <file-or-dir> [--scope ...] [--inv "<invariant>"] [--dep T1] [--why "<context>"]
    ```
    A good task: one behavior, 1-3 files, a targeted `--verify` (one test file or test id, not the
-   whole suite), and invariants for numerical work (conservation, symmetry, order of accuracy,
-   bounds). Characterize current behavior first, change it next, switch defaults/docs last.
+   whole suite). Pick the check by the kind of work:
+   - Feature: a test of the new behavior (FAIL first).
+   - Bug fix: a test that reproduces the bug (FAIL first), then the fix.
+   - Refactor or migration: the existing tests that cover the code (PASS before and after).
+   - Performance: a benchmark command that fails above a time or memory limit you measured.
+   - Numerical change: invariants (`--inv`) and tests for them: conservation, symmetry, order of
+     accuracy, bounds.
+
+   Characterize current behavior first, change it next, switch defaults and docs last.
 
 ## 4. Task loop
 
@@ -102,11 +110,15 @@ Run every command from the repository root.
   session ends. Meanwhile read code or use note/hyp/now, but do not edit files. Never wrap sci in
   `nohup`, `&`, `timeout` or sleep loops.
 - `verify` reuses steps that passed on identical code and leaves earlier tasks' tests to the
-  regression suite when the suite runs them. After a PASS, editing documentation that no check reads
-  needs no new verify.
+  regression suite when the suite runs them. After a failed verify, `check` also reruns what failed
+  until it passes.
+- After a verify PASS, edits to documentation, or to comments and layout in Python files, need no new
+  verify unless a check reads them. Run formatters and linters before `verify`.
 - Experiments and probes: `.sci/sci run "python3 .sci/scratch/probe.py"` (repo on PYTHONPATH,
   output logged as evidence). Keep scratch files in `.sci/scratch/`; they are never committed.
   Edit code with your file-editing tool, not with scripts.
+- Tests that run against built output (C/C++, Fortran, Cython, CUDA, Rust, compiled TypeScript) need
+  `.sci/sci config set build_cmd "<rebuild command>"`; sci then rebuilds whenever sources change.
 - Undo: `.sci/sci restore` (back to the last PASS), `--to start`, or `--paths <file>`.
 - sci runs `--verify`, `--cmd` and `run` commands with bash (Git Bash on Windows): use forward
   slashes and bash quoting in them, even when your own shell is PowerShell.
@@ -117,11 +129,12 @@ Run every command from the repository root.
 | --- | --- |
 | `STOP` | Do not edit code. `.sci/sci hyp add "<specific cause>"` (at least 2). Test each with a small `.sci/sci run` experiment. `.sci/sci hyp refute H1 "<evidence>"` or `.sci/sci hyp confirm H2 "<evidence>"`. Then fix only the confirmed cause. |
 | `ESCALATE` | `.sci/sci restore --to start` and try a different approach (write it down with `.sci/sci note --kind decision`), or block the task and ask the human. |
-| `LOCKED FILE CHANGED`, `EXISTING TEST WEAKENED`, `PROTECTED TEST CHANGED` | `.sci/sci restore --paths <file>`. Only if the test itself is wrong: `.sci/sci unlock <file> --reason "..."`. |
-| `REGRESSION: your change broke T2` | Fix your code. Never edit T2's tests. |
-| `FAIL golden <name>` | Numbers changed. Unintended: fix the code. Intended (better scheme, real bug fix): `.sci/sci golden update <name> --reason "..."`. |
-| `NEW FAILURES (not in baseline)` | Your change broke other tests. Fix them before `done`. |
-| `OUT OF SCOPE` / `Changes outside ... scope` | `.sci/sci restore --paths <file>`; if the change is truly needed: `.sci/sci task scope <glob>`. |
+| `LOCKED FILE CHANGED`, `EXISTING TEST WEAKENED`, `PROTECTED TEST CHANGED` | `.sci/sci restore --paths <file>`. If the test is wrong or must follow an intended change of this task: `.sci/sci unlock <file> --reason "..."`. |
+| `REGRESSION: your change broke T2` | Fix your code, then `.sci/sci check` (it reruns T2's check). Change T2's tests only if they must follow an intended change of this task (`unlock`, as above). |
+| `FAIL golden <name>` | Output changed. Unintended: fix the code. Intended (a bug fix, a better method): `.sci/sci golden update <name> --reason "..."`. |
+| `NEW FAILURES (not in baseline)` | Your change broke other tests. Fix the code, then `.sci/sci check` (it reruns them). |
+| `pass when they run alone but fail in the full suite` | The failing tests depend on what other tests leave behind (shared state, files, processes). Find it; `check` now runs the whole suite. |
+| `OUT OF SCOPE` / `Changes outside ... scope` | Needed for this task: `.sci/sci task scope <glob>`. A drive-by edit: `.sci/sci restore --paths <file>`. |
 | `Untracked files ... not in its scope` | Delete them, move scratch work to `.sci/scratch/`, or add them: `.sci/sci done -m "..." --add <file>`. |
 | `not verified on the current files` | Run `.sci/sci verify` again. |
 | `TIMED OUT` | Check a narrower command: `.sci/sci check --cmd "<single test>"`. |
@@ -130,7 +143,7 @@ Run every command from the repository root.
 | `INTERRUPTED` | Run the command again; steps that passed are reused. If it says your environment ends background processes: `.sci/sci config set background false`. |
 | `REFUSED: ... DO: ...` | Run the command after `DO:`. |
 
-## 6. Scientific practice
+## 6. Numerical and scientific code
 
 - Units first: find the unit system and conventions (SI or nondimensional, degrees or radians,
   array order, grid staggering, sign conventions) and save them with `--kind units`.
@@ -143,8 +156,7 @@ Run every command from the repository root.
 - Floats: compare with tolerances (isclose/allclose), never `==`. Use solve, not inv. Watch for
   cancellation (expm1, log1p, logsumexp). Assert finite values at module boundaries.
 - Tolerances come from analysis or a script, never from loosening until green.
-- Fix random seeds. Compiled code (C/C++/Fortran/Cython/CUDA) must be rebuilt before testing:
-  `.sci/sci config set build_cmd "<rebuild command>"` and sci rebuilds when sources change.
+- Fix random seeds.
 
 Templates for convergence, MMS, conservation and golden tests: `references/scientific-verification.md`.
 

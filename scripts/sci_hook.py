@@ -210,8 +210,10 @@ def stop_decision(root, st, payload):
         hs = json.loads(hs_path.read_text(encoding="utf-8"))
     except Exception:
         hs = {}
-    if hs.get("updated") != st.get("updated"):
-        hs = {"updated": st.get("updated"), "streak": 0}
+    # A test run or a task status change is progress; reading the state or writing notes is not.
+    progress = [st.get("runs"), [[t.get("id"), t.get("status")] for t in tasks]]
+    if hs.get("progress") != progress:
+        hs = {"progress": progress, "streak": 0}
     if hs.get("streak", 0) >= 2:
         return {}
     hs["streak"] = hs.get("streak", 0) + 1
