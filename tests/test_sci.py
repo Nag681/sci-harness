@@ -1101,7 +1101,7 @@ class TestFailedVerify(unittest.TestCase):
         sb = Sandbox(self)
         out = self._regressed(sb)
         self.assertIn("REGRESSION: your change broke T1's check", out)
-        self.assertIn("it also reruns regression T1", out)
+        self.assertIn("it also reruns what failed the last verify (regression T1)", out)
         for k in (2, 3, 4):
             sb.write("pkg/calc.py", self.calc(k))
             rc, out = sb.sci("check")
@@ -1401,6 +1401,14 @@ class TestNavigation(unittest.TestCase):
 
 
 class TestUnits(unittest.TestCase):
+    def test_test_files_next_to_the_code_are_a_python_project(self):
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "notes.txt").write_text("x\n", encoding="utf-8")
+            self.assertEqual(sci.detect_toolchain(d)[0], "")
+            Path(d, "test_bill.py").write_text("import unittest\n", encoding="utf-8")
+            Path(d, "tests").mkdir()
+            self.assertRegex(sci.detect_toolchain(d)[0], r" -m (pytest -q|unittest discover -s \. -q)$")
+
     def test_failure_extraction(self):
         lines = ["FAILED tests/test_a.py::test_x - assert 1 == 2", "ERROR tests/test_b.py - ImportError: no",
                  "tests/test_c.py::test_y FAILED  [ 50%]", "FAIL: test_z (tests.test_d.TestD.test_z)",

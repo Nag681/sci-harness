@@ -36,7 +36,7 @@ import threading
 import time
 from pathlib import Path
 
-VERSION = "3.3.0"
+VERSION = "3.3.1"
 SD = ".sci"
 SCHEMA = 1
 WINDOWS = os.name == "nt"
@@ -2028,11 +2028,11 @@ def compute_next(st, cfg, live_tree=None, live_ok=None, job=None):
             if g and lc and (lc.get("by_verify") or lc.get("pending_failed")):
                 return "Golden %s is up to date. Run `.sci/sci verify` again." % g
             if p:
-                return ("Fix the code (not the tests), then `.sci/sci check`; it also reruns %s, which failed the "
-                        "last verify. Strike %d/3." % (p["label"], t.get("strikes", 0)))
+                return ("Fix the code (not the tests), then `.sci/sci check`; it also reruns what failed the last "
+                        "verify (%s). Strike %d/3." % (p["label"], t.get("strikes", 0)))
             return "Fix the code (not the tests), then `.sci/sci check`. Strike %d/3." % t.get("strikes", 0)
         if p and p.get("passed_tree") != lc.get("tree"):
-            return "Run `.sci/sci check`: it also reruns %s, which failed the last verify." % p["label"]
+            return "Run `.sci/sci check`: it also reruns what failed the last verify (%s)." % p["label"]
         vt = t.get("verified_tree")
         if not vt:
             return "Checks pass. Run `.sci/sci verify` (full gate)."
@@ -2254,7 +2254,8 @@ def detect_toolchain(root):
             py = cand
             break
     pyproj = has("pyproject.toml", "setup.py", "setup.cfg", "pytest.ini", "tox.ini", "conftest.py")
-    if pyproj or ((root / "tests").is_dir() and any((root / "tests").glob("*.py"))):
+    root_tests = any(root.glob("test*.py"))
+    if pyproj or root_tests or ((root / "tests").is_dir() and any((root / "tests").glob("*.py"))):
         found = python_argv()
         interp_s = py or (" ".join(found) if found else PY_HINT)
         if py and WINDOWS and not windows_bash():
@@ -2274,7 +2275,8 @@ def detect_toolchain(root):
         elif has("pixi.toml") and shutil.which("pixi"):
             cmd = "pixi run pytest -q"
         else:
-            cmd = "%s -m unittest discover -s %s -q" % (interp_s, "tests" if (root / "tests").is_dir() else ".")
+            start = "tests" if (root / "tests").is_dir() and not root_tests else "."
+            cmd = "%s -m unittest discover -s %s -q" % (interp_s, start)
             notes.append("pytest not importable with %s; using unittest. Set test_cmd if the project uses pytest "
                          "in another environment (conda/module/venv)." % interp_s)
         notes.append("Python project detected -> %s" % cmd)
@@ -4846,7 +4848,7 @@ WORK
                                   with STILL RUNNING; their result is saved when they finish) | cancel
   done -m "summary" [--add FILE]... [--allow-outside "why"] [--no-lock "why"] [--no-commit]
   restore [--to green|start] [--paths P]...    undo safely (current version saved as a patch first)
-  unlock [FILES] --reason "..."   only when a test itself is wrong (flagged for human review)
+  unlock [FILES] --reason "..."   a test that is wrong or must follow an intended change (human reviews it)
 DEBUG (required after STOP)
   run "cmd"                       run an experiment from the repo root (PYTHONPATH includes the repo), logged
   hyp add "cause" [--test "cmd"] | hyp refute H1 "evidence" | hyp confirm H1 "evidence" | hyp list [--all]

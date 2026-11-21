@@ -14,7 +14,7 @@ compatibility: >-
   OpenCode, pi, Cursor).
 allowed-tools: Bash Read Write Edit Glob Grep
 metadata:
-  version: "3.3.0"
+  version: "3.3.1"
 ---
 
 # Long coding tasks that stay on track
