@@ -78,7 +78,10 @@
                 Write-Host "sci-harness: downloading $repo ($ref)"
                 Invoke-WebRequest -Uri $url -OutFile $zip -Headers $headers -UseBasicParsing
             }
-            Expand-Archive -LiteralPath $zip -DestinationPath $tmp -Force
+            # Not Expand-Archive: Windows PowerShell started from pwsh loads pwsh's Archive module, which calls a
+            # .NET overload that Windows PowerShell lacks.
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            [IO.Compression.ZipFile]::ExtractToDirectory($zip, $tmp)
             $found = Get-ChildItem -LiteralPath $tmp -Directory |
                 Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'install.py') } |
                 Select-Object -First 1
