@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.1] - 2026-11-21
+
+### Fixed
+- `install.ps1` failed in Windows PowerShell 5.1 started from PowerShell 7, for example
+  `powershell -File install.ps1` typed in a pwsh window. It loaded PowerShell 7's `Expand-Archive`, which calls a
+  .NET method that 5.1 lacks. The installer now unpacks the download with .NET directly.
+- `init` found no test command in a Python project whose `test_*.py` files sit next to the code, so `baseline` was
+  refused until the agent set one. Such files now mark a Python project, and the command is pytest or
+  `unittest discover -s .`.
+
+### Changed
+- After a failed `verify`, `NEXT:` says "it also reruns what failed the last verify (regression suite)" instead of
+  "it also reruns regression suite, which failed the last verify".
+- `.sci/sci help` says `unlock` is for a test that is wrong or must follow an intended change.
+- README: rewritten, with a banner, a terminal picture, the bill-splitter example as real sci 3.3.1 output, and
+  reference tables for the commands and settings. `.github/readme/demo.sh` replays the example, and
+  `.github/readme/build.py` draws the images and checks that every quoted line is real output.
+
 ## [3.3.0] - 2026-11-21
 
 sci is now a general software-engineering skill: features, bug fixes, refactors, migrations and performance work
