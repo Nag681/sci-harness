@@ -31,6 +31,7 @@ review from Gemini; every finding below was reproduced before it was fixed.
 - `run "cmd" --tail 20` ran `cmd --tail 20`; options after a quoted command are sci's now.
 - `lock FILE` after `lock --none` left the task treated as having nothing to lock.
 - A pre-commit hook that rejected `done`'s commit left new files staged in the user's index.
+- `wait` crashed when a background job's output file was missing.
 - The optional hooks blocked deleting `.sci/scratch/` files, notes and commit messages that start with "git reset
   --hard" or "rm -rf .sci", and `git restore -S`; they let `/usr/bin/git reset --hard` through. A hook payload
   that names a directory no longer falls back to another repository.
@@ -61,7 +62,10 @@ review from Gemini; every finding below was reproduced before it was fixed.
   mentions which documents is kept per file in `.sci/mentions.json`, and glob lists match as one regex.
 - SKILL.md: `allowed-tools` pre-approves only sci's own commands and read-only tools (`Bash(.sci/sci:*) Read Grep
   Glob`) instead of every shell command and file edit. Language examples for Python, Rust and JavaScript;
-  `references/large-codebases.md` has a Rust and JavaScript section.
+  `references/large-codebases.md` has a Rust and JavaScript section. When the skill folder is unknown, SKILL.md
+  checks the known install paths before a depth-limited `find ~`.
+- README: the optional hooks remind the agent with each message you send (each model step only in Antigravity),
+  not "every turn".
 
 ## [3.3.1] - 2026-11-21
 
