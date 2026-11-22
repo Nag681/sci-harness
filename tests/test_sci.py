@@ -2411,7 +2411,8 @@ class TestRustGuard(unittest.TestCase):
         sb = self.crate(lib)
         sb.ok("lock", "src/lib.rs")
         st = sb.state()
-        legacy = sci.sha256_text(sci.test_region_text("src/lib.rs", lib, legacy=True))
+        disk = sci.read_text(sb.root / "src" / "lib.rs")  # as sci reads it (CRLF on Windows)
+        legacy = sci.sha256_text(sci.test_region_text("src/lib.rs", disk, legacy=True))
         new = st["tasks"][0]["locked_regions"]["src/lib.rs"]
         self.assertNotEqual(legacy, new)
         st["tasks"][0]["locked_regions"]["src/lib.rs"] = legacy  # as sci 3.4.0 recorded it
