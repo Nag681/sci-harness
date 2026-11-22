@@ -44,7 +44,8 @@ sci never edits your code. It checks, records and, when asked, undoes; every att
 | **Lock** | `lock` records the acceptance tests (in Rust, just the tests inside a source file). Any change to them fails every check. A test that must follow an intended change is freed with `unlock --reason`, and the reason goes on your review list. |
 | **Guard** | Every check also confirms that no finished task's test changed and no test was weakened: a new skip or `#[ignore]`, a deleted assert, `assert True`, a looser tolerance, a changed expected number. |
 | **Strikes** | A failed check after a code change, once the test is locked. Reruns of unchanged code and guard-only failures are not strikes. |
-| **STOP** | After 3 strikes the agent writes at least 2 hypotheses and runs an experiment through sci before it may edit code. After 6, it starts over a different way or asks you. Ruled-out causes stay listed for later tasks. |
+| **STOP** | After 3 strikes the agent writes at least 2 hypotheses and runs an experiment through sci before it may edit code. After 6, it starts over a different way or asks you. Ruled-out causes stay listed for later tasks. Code changed while STOP is on is not blocked, but `report` counts it for you. |
+| **Hand edits** | `.sci/state.json` and `.sci/config.json` change only through sci commands. When either was edited by hand, sci warns and puts the changed fields (`T2.strikes`, `ignore_globs`) on your review list. |
 | **Verify** | The guard, the build, this task's test, every finished task's test, saved reference outputs and your whole suite. Only failures that are not in the baseline count. Steps that passed on identical code are reused. |
 | **Rerun what failed** | After a failed verify, `check` reruns just the failing tests (pytest, unittest, cargo, jest, vitest, `node --test`). |
 | **Done** | Commits only the task's files, as `[T1]`, after a verify on the current files. Comment or doc edits after verify are fine. |
@@ -226,13 +227,18 @@ The skill lives in `~/.local/share/agent-skills/sci`, and each agent gets a link
 | Codex CLI | `~/.agents/skills/` | `~/.codex/hooks.json` ¹ |
 | Gemini CLI | `~/.agents/skills/` | `~/.gemini/settings.json` |
 | Antigravity | `~/.gemini/config/plugins/sci/` | the plugin's `hooks.json` |
-| OpenCode, pi | `~/.agents/skills/` | |
+| OpenCode | `~/.agents/skills/` | the plugin `~/.config/opencode/plugins/sci.js` ² |
+| pi | `~/.agents/skills/` | |
 | anything else | `--target <dir>` | |
 
 Anything in the way that the installer did not put there is moved to `~/.local/share/agent-skills/backups/`,
 never deleted. Restart running agents after installing.
 
 ¹ Current Codex runs hooks unless its `config.toml` has `[features] hooks = false`; older versions need `hooks = true` there.
+
+² OpenCode has plugins instead of hook commands. The plugin file imports `scripts/opencode_plugin.mjs` from the
+installed skill, which works with OpenCode 1.18.29 and newer, including 2.x. Restart OpenCode (on 2.x:
+`opencode service restart`) after turning the hooks on or off.
 
 </details>
 
@@ -245,8 +251,9 @@ Off unless you install with `--hooks`, and inactive outside repositories that us
 | When | What happens |
 | --- | --- |
 | a session starts, or (Claude Code, Antigravity) the context was summarized | the agent is told where the plan is and what to do next |
+| every model request (OpenCode) | the same briefing is part of the system prompt, so compaction cannot drop it |
 | each message you send (Antigravity: each step) | a one-line reminder: goal, progress, active task, last check, next step |
-| before a shell command | commands that destroy work, such as `git reset --hard` and `git clean`, are blocked |
+| before a shell command | commands that destroy work, such as `git reset --hard` and `git clean`, are blocked (the agent is told why and what to use instead) |
 | Antigravity stops | with `autopilot` on, the agent is asked to continue while tasks remain |
 
 The hooks never approve anything on their own; your agent's permission settings still apply.

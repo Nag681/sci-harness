@@ -36,7 +36,8 @@ import threading
 import time
 from pathlib import Path
 
-VERSION = "3.4.1"
+VERSION = "3.4.2"
+REGIONS_V = 3  # how sci cuts Rust test regions (see rust_test_spans)
 SD = ".sci"
 SCHEMA = 1
 WINDOWS = os.name == "nt"
@@ -445,16 +446,17 @@ def new_state(objective):
         "next_task": 1, "next_hyp": 1, "next_note": 1, "hyps": [], "notes": [], "now": None,
         "goldens": {}, "protected": {}, "protected_regions": {}, "acks": {}, "review": [], "baseline": None, "runs": 0,
         "paused": False, "last_verify": None, "violations": [], "last_build_tree": None,
-        "passes": {}, "durations": {}, "regions_v": 2, "auto_ignored": [],
+        "passes": {}, "durations": {}, "regions_v": REGIONS_V, "auto_ignored": [],
     }
 
 
-def upgrade_regions(repo, st):
-    """sci 3.4.0 started a Rust test region at its test attribute; since 3.4.1 it starts at the item's first
-    attribute. Guarded regions whose tests are unchanged get the new boundaries, so the upgrade flags nothing."""
+def upgrade_regions(repo, st, old):
+    """Rust test regions recorded by an earlier sci (`old`: the regions_v it wrote) get the current boundaries
+    when their tests are unchanged, so the upgrade flags nothing. sci 3.4.0 started a region at its test attribute,
+    3.4.1 at the item's first attribute but a proptest! block at the macro, 3.4.2 every item at its first attribute."""
     def redo(p, sha):
         text = read_text(repo.root / p)
-        if text is None or sha256_text(test_region_text(p, text, legacy=True)) != sha:
+        if text is None or sha256_text(test_region_text(p, text, v=old)) != sha:
             return None
         cur = test_region_text(p, text)
         if cur:
@@ -465,11 +467,11 @@ def upgrade_regions(repo, st):
     for t in st.get("tasks") or []:
         for p, h in list((t.get("locked_regions") or {}).items()):
             t["locked_regions"][p] = redo(p, h) or h
-    st["regions_v"] = 2
+    st["regions_v"] = REGIONS_V
 
 
 TASK_DEFAULTS = (("scope", []), ("invariants", []), ("deps", []), ("locked", {}), ("lock_none", None), ("unlocked", []), ("locked_regions", {}),
-                 ("strikes", 0), ("stop", None), ("stop_cycles", 0), ("resets", 0), ("was_locked", []),
+                 ("strikes", 0), ("stop", None), ("stop_cycles", 0), ("stop_edits", 0), ("resets", 0), ("was_locked", []),
                  ("last_check", None), ("attempts", 0),
                  ("why", ""), ("block_reason", ""), ("status", "todo"))
 
@@ -599,6 +601,34 @@ class Store:
             return data
         return None
 
+    def _outside_edits(self, path):
+        """What differs in `path` (state.json, config.json) from the copy sci saved last in the git directory: the
+        names of changed settings, or of changed state fields (T2.strikes). [] when they match."""
+        now, saved = read_text(path), read_text(self.repo.backup_dir / path.name)
+        if now is None or saved is None or now == saved:
+            return []
+        try:
+            a, b = json.loads(saved), json.loads(now)
+        except ValueError:
+            return []
+        if not isinstance(a, dict) or not isinstance(b, dict):
+            return []
+        out = []
+        for k in sorted(set(a) | set(b)):
+            if k in ("updated", "next", "anchor") or a.get(k) == b.get(k):
+                continue  # sci rewrites the first three on every save
+            old, new = a.get(k), b.get(k)
+            if k == "tasks" and isinstance(old, list) and isinstance(new, list):
+                ta = {x.get("id"): x for x in old if isinstance(x, dict)}
+                tb = {x.get("id"): x for x in new if isinstance(x, dict)}
+                for tid in sorted(set(ta) | set(tb), key=str):
+                    x, y = ta.get(tid) or {}, tb.get(tid) or {}
+                    out += ["%s.%s" % (tid, f) for f in sorted(set(x) | set(y)) if x.get(f) != y.get(f)] if x and y \
+                        else ["%s (%s)" % (tid, "added" if y else "removed")] if x != y else []
+            else:
+                out.append(k)
+        return out
+
     def load(self):
         st = self._read_json(self.state_path, "state.json")
         if st is None:
@@ -606,10 +636,20 @@ class Store:
                    'Initialize from the repo root: %s <skill-dir>/scripts/sci.py init --objective "<goal>"' % PY_HINT)
         cfg = dict(DEFAULT_CONFIG)
         cfg.update(self._read_json(self.config_path, "config.json") or {})
-        old_regions = "regions_v" not in st
+        regions_v = int(st.get("regions_v") or 1)
         self.st, self.cfg = upgrade_state(st), cfg
-        if old_regions:
-            upgrade_regions(self.repo, self.st)
+        if regions_v < REGIONS_V:
+            upgrade_regions(self.repo, self.st, regions_v)
+        for path in (self.state_path, self.config_path):
+            changed = self._outside_edits(path)
+            if changed:
+                what = "%s (%s)" % (path.name, ", ".join(changed[:6]) + (" ..." if len(changed) > 6 else ""))
+                msg = ("%s was changed outside sci. Change sci's files only with sci commands; this is listed for "
+                       "the human's review." % what)
+                if msg not in self.warnings:
+                    self.warnings.append(msg)
+                add_review(self.st, None, "edited-outside-sci", "%s changed without a sci command. If you did not "
+                           "make this change, the agent edited sci's records by hand." % what)
         self.st["runs"] = max(int(self.st.get("runs") or 0), self.max_run)
         return self.st, self.cfg
 
@@ -1575,15 +1615,35 @@ def _rs_attrs_start(m, i):
         i = k - 1
 
 
-def rust_test_spans(text, legacy=False):
+def _rs_path_start(m, i):
+    """Offset where the macro path ending at `i` starts: `proptest::proptest!` begins at its first `proptest`."""
+    while True:
+        j = i
+        while j > 0 and m[j - 1].isspace():
+            j -= 1
+        if j < 2 or m[j - 2:j] != "::":
+            return i
+        colon = j = j - 2
+        while j > 0 and m[j - 1].isspace():
+            j -= 1
+        k = j
+        while k > 0 and (m[k - 1].isalnum() or m[k - 1] == "_"):
+            k -= 1
+        if k == j:
+            return colon  # `::proptest::proptest!`: a path from the crate root
+        i = k
+
+
+def rust_test_spans(text, v=REGIONS_V):
     """[(start, end)] character spans of the test code in Rust source: items under #[cfg(test)], functions with a
     test attribute (#[test], #[tokio::test], #[rstest], #[test_case(..)] ...) and proptest! blocks. A span starts at
-    the item's first attribute (`legacy`: at the test attribute, as sci 3.4.0 did)."""
+    the item's first attribute. `v` cuts them as an earlier sci did: 1 (sci 3.4.0) at the test attribute, 2 (3.4.1)
+    a proptest! block at the macro name, without the attributes above it."""
     if "test" not in text:
         return []
     m = rust_mask(text)
     spans = []
-    first = (lambda i: i) if legacy else (lambda i: _rs_attrs_start(m, i))
+    first = (lambda i: i) if v < 2 else (lambda i: _rs_attrs_start(m, i))
     for a in RS_CFG_TEST_RE.finditer(m):
         arg = a.group("arg")
         if re.search(r"\btest\b", arg) and not re.search(r"\bnot\s*\(\s*test\b", arg):
@@ -1593,7 +1653,7 @@ def rust_test_spans(text, legacy=False):
         if last in RS_TEST_ATTRS or last.startswith("test_"):
             spans.append((first(a.start()), _rs_item_end(m, _rs_skip_attrs(m, a.start()))))
     for a in RS_PROPTEST_RE.finditer(m):
-        spans.append((a.start(), _rs_item_end(m, a.start())))
+        spans.append((first(_rs_path_start(m, a.start())) if v >= 3 else a.start(), _rs_item_end(m, a.start())))
     spans.sort()
     merged = []
     for s_, e in spans:
@@ -1663,12 +1723,13 @@ def has_inline_tests(path):
     return path.endswith(".rs")
 
 
-def test_region_text(path, text, legacy=False):
-    """The test code inside source file `path` (whole lines), regions separated by REGION_SEP; '' if none."""
+def test_region_text(path, text, v=REGIONS_V):
+    """The test code inside source file `path` (whole lines), regions separated by REGION_SEP; '' if none. `v`: as
+    rust_test_spans."""
     if text is None or not has_inline_tests(path):
         return ""
     blocks = []
-    for s_, e in rust_test_spans(text, legacy):
+    for s_, e in rust_test_spans(text, v):
         a = text.rfind("\n", 0, s_) + 1
         b = text.find("\n", e)
         blocks.append(text[a:len(text) if b < 0 else b].rstrip("\n"))
@@ -2491,12 +2552,38 @@ def narrow_js(cmd, failing, files):
         if path not in paths:
             paths.append(path)
     if prog in ("jest", "vitest") or (prog == "node" and "--test" in rest) or (prog == "bun" and rest[:1] == ["test"]):
-        return " ".join(shlex.quote(w) for w in words + paths)
-    script = prog == "test" or (prog == "npm" and rest[:1] in (["test"], ["t"]) or rest[:2] == ["run", "test"])
+        at = next(k for k, w in enumerate(words) if w.rsplit("/", 1)[-1].lower() == prog) + 1
+        if prog == "bun" or (prog == "vitest" and rest[:1] in (["run"], ["watch"], ["related"])):
+            at += 1  # the subcommand
+        return " ".join(shlex.quote(w) for w in _drop_js_dirs(words, at, paths) + paths)
+    # `prog` is "test" for `yarn test`, `pnpm run test` ...: _runner_word drops those words; bun's `run` stays.
+    script = prog == "test" or (prog in ("npm", "bun") and (rest[:1] in (["test"], ["t"]) or rest[:2] == ["run", "test"]))
     if script and js_test_script() in ("jest", "vitest"):
-        sep = [] if "--" in words or prog == "test" else ["--"]
-        return " ".join(shlex.quote(w) for w in words + sep + paths)
+        if "--" in words:
+            return " ".join(shlex.quote(w) for w in _drop_js_dirs(words, words.index("--") + 1, paths) + paths)
+        return " ".join(shlex.quote(w) for w in words + ([] if prog == "test" else ["--"]) + paths)
     return None
+
+
+# Flags of jest, vitest and node --test that take no value, so the word after one may be a path the suite selects.
+JS_BOOL_FLAGS = {"--", "--test", "--ci", "--runInBand", "-i", "--silent", "--verbose", "--coverage",
+                 "--passWithNoTests", "--no-cache", "--detectOpenHandles", "--forceExit", "--run", "--no-watch"}
+
+
+def _drop_js_dirs(words, start, paths):
+    """`words` without the folders and files (from `start` on) that hold any of `paths`: jest and vitest run a
+    path given together with others as `either`, so `jest tests/ tests/a.test.ts` would run all of tests/."""
+    keep = list(words[:start])
+    for k in range(start, len(words)):
+        w = words[k]
+        prev = words[k - 1] if k > 0 else ""
+        value = prev.startswith("-") and "=" not in prev and prev not in JS_BOOL_FLAGS  # the value of a flag
+        d = w[2:] if w.startswith("./") else w
+        d = d.rstrip("/")
+        if not w.startswith("-") and not value and d and any(p == d or p.startswith(d + "/") for p in paths):
+            continue
+        keep.append(w)
+    return keep
 
 
 def narrow_cargo(cmd, failing):
@@ -4368,6 +4455,11 @@ def record_attempt(store, t, ok, tree, run, guard_only=False):
     msgs = []
     prev = t.get("last_check")
     changed = prev is not None and prev.get("tree") != tree
+    if t.get("stop") and changed:
+        t["stop_edits"] = int(t.get("stop_edits") or 0) + 1
+        store.log("STOP_EDIT", task=t["id"], msg="code changed while STOP was on")
+        msgs.append("note: the code changed while STOP was on (%d time(s) in %s); `.sci/sci report` lists it for the "
+                    "human." % (t["stop_edits"], t["id"]))
     if ok:
         t["strikes"] = 0
         t["last_green_tree"] = tree
@@ -4591,6 +4683,8 @@ def cmd_check(args):
             # The ignored files are out of the snapshot from now on: compare later checks with that tree.
             cur_tree = snapshot(repo, cfg)[0]
             cmd_fp = step_fp(store, cur_tree, cmd)
+            if pend:
+                pfp = step_fp(store, cur_tree, pend["full"])
             viol = run_guard(repo, st, cfg, t, cur_tree) if dropped else viol
         if built is not None:
             note_result(st, "build:" + build, None, built.ok, built.secs)
@@ -5233,6 +5327,8 @@ def cmd_restore(args):
             print("Nothing to restore: files already match the %s state%s." % (to, " for those paths" if paths else ""))
             if to == "start" and not paths and (t.get("strikes") or t.get("stop")):
                 t.update({"strikes": 0, "stop": None, "resets": int(t.get("resets") or 0) + 1})
+                if t.get("last_check"):
+                    t["last_check"]["tree"] = cur_tree  # as after a restore: the confirming check is no attempt
                 store.save()
                 print("Strikes reset: this is a fresh start. Write down the new approach before coding: "
                       ".sci/sci note \"<approach and why the last one failed>\" --kind decision")
@@ -5953,6 +6049,10 @@ def cmd_report(args):
         L += ["", "Decisions:"] + ["- " + n["text"] for n in dec]
     if st["review"]:
         L += ["", "NEEDS YOUR REVIEW:"] + ["- [%s] %s: %s" % (r["kind"], r.get("task") or "-", r["msg"]) for r in st["review"]]
+    stop = [t for t in st["tasks"] if t.get("stop_edits")]
+    if stop:
+        L += ["", "Code changed while STOP was on (STOP asks for tested hypotheses before more fixes):"] + [
+            "- %s: %d time(s)" % (t["id"], t["stop_edits"]) for t in stop]
     blocked = [t for t in st["tasks"] if t["status"] == "blocked"]
     if blocked:
         L += ["", "Open questions:"] + ["- %s: %s" % (t["id"], t.get("block_reason", "")) for t in blocked]

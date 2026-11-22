@@ -1,12 +1,13 @@
 ---
 name: sci
 description: >-
-  Keeps coding agents on track in long, multi-step software work in real codebases: features, bug fixes,
-  refactors, migrations, performance work, and scientific or numerical code, in Python, Rust,
-  JavaScript/TypeScript or any other language. Use when starting, continuing or resuming multi-step coding
-  work, after a conversation was summarized or compacted, or when work has lost direction. Keeps the plan, task status, test results, ruled-out causes and codebase
-  notes on disk; runs each task's acceptance test, earlier tasks' checks, saved reference outputs and the
-  regression suite before every commit; stops repeated failed fixes; undoes safely. Works with any model.
+  Keeps coding agents on track in long, multi-step coding work. Use when starting, continuing or resuming
+  multi-step work in a real codebase (features, bug fixes, refactors, migrations, performance work, scientific
+  or numerical code; Python, Rust, JavaScript/TypeScript or any other language), after a conversation was
+  summarized or compacted, or when work has lost direction. Not for one-line edits, questions or read-only
+  exploration. Keeps the plan, task status, test results, ruled-out causes and codebase notes on disk; runs
+  each task's acceptance test, earlier tasks' checks, saved reference outputs and the regression suite before
+  every commit; stops repeated failed fixes; undoes safely. Works with any model.
 license: MIT
 compatibility: >-
   Needs git and Python 3.8+ (standard library only); any language and test runner. Linux, macOS and Windows.
@@ -14,7 +15,7 @@ compatibility: >-
   OpenCode, pi, Cursor).
 allowed-tools: Bash(.sci/sci:*) Read Grep Glob
 metadata:
-  version: "3.4.1"
+  version: "3.4.2"
 ---
 
 # Long coding tasks that stay on track

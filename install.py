@@ -83,6 +83,18 @@ def runs_python(argv):
 
 
 @functools.lru_cache(maxsize=None)
+def python_argv():
+    """python_cmd() as a program and its arguments, the program as a full path: OpenCode runs plugins in a
+    background service, whose PATH may not be the terminal's."""
+    cands = [["py", "-3"], ["python"], ["python3"]] if WINDOWS else [["python3"]]
+    for c in cands:
+        exe = shutil.which(c[0])
+        if exe and runs_python(c):
+            return [Path(exe).as_posix()] + c[1:]
+    return [Path(sys.executable).as_posix()]
+
+
+@functools.lru_cache(maxsize=None)
 def python_cmd():
     """How hooks and printed commands start Python 3.8+ here: python3 on POSIX; on Windows py -3, python or
     python3, whichever really runs (the Microsoft Store stubs named python/python3 only print an install hint).
@@ -100,20 +112,22 @@ CODEX_HOME = Path(os.environ.get("CODEX_HOME") or HOME / ".codex")
 AGENTS_SKILLS = HOME / ".agents" / "skills"
 AGY_PLUGINS = HOME / ".gemini" / "config" / "plugins"
 GEMINI_SETTINGS = HOME / ".gemini" / "settings.json"
+OPENCODE_HOME = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "opencode"
+OPENCODE_PLUGIN = OPENCODE_HOME / "plugins" / ("%s.js" % (NAME or "sci"))  # OpenCode loads every file there
 
 # agent -> (skills directory it reads, how to detect it, hook config kind)
 AGENTS = {
     "claude": (CLAUDE_HOME / "skills", ("claude",), CLAUDE_HOME, "claude"),
     "codex": (AGENTS_SKILLS, ("codex",), CODEX_HOME, "codex"),
     "gemini": (AGENTS_SKILLS, ("gemini",), None, "gemini"),
-    "opencode": (AGENTS_SKILLS, ("opencode",), HOME / ".config" / "opencode", None),
+    "opencode": (AGENTS_SKILLS, ("opencode",), OPENCODE_HOME, "opencode"),
     "pi": (AGENTS_SKILLS, ("pi",), HOME / ".pi", None),
     "antigravity": (None, ("agy", "antigravity"), AGY_PLUGINS, "antigravity"),
 }
 READERS = {CLAUDE_HOME / "skills": "Claude Code, OpenCode", AGENTS_SKILLS: "Gemini CLI, Codex, OpenCode, pi"}
 # Where older or manual installs may live: shown by --status, removed by --uninstall when they are ours.
 OTHER_SKILL_DIRS = [CODEX_HOME / "skills", HOME / ".gemini" / "skills", HOME / ".gemini" / "config" / "skills",
-                    HOME / ".config" / "opencode" / "skill", HOME / ".config" / "opencode" / "skills",
+                    OPENCODE_HOME / "skill", OPENCODE_HOME / "skills",
                     HOME / ".cursor" / "skills"]
 
 
@@ -383,6 +397,8 @@ def hooks_present(agent):
     if kind == "antigravity":
         hj = agy_plugin_dir() / "hooks.json"
         return hj.is_file() and HOOK_TAG in hj.read_text(encoding="utf-8")
+    if kind == "opencode":
+        return opencode_plugin_ours()
     path = {"claude": CLAUDE_HOME / "settings.json", "codex": CODEX_HOME / "hooks.json",
             "gemini": GEMINI_SETTINGS}.get(kind)
     if path is None:
@@ -510,6 +526,45 @@ def set_agy_hooks(plan, home_dir, on, quiet=False):
 
 # --------------------------------------------------------------------------- commands
 
+# --------------------------------------------------------------------------- opencode plugin
+
+OPENCODE_TAG = "opencode_plugin.mjs"  # the module our plugin file imports: marks the file as ours
+
+
+def opencode_plugin_text(home_dir):
+    """OpenCode has no hook commands, only plugins: this one imports scripts/opencode_plugin.mjs from the
+    installed copy (so updates reach it) and tells it which Python runs sci_hook.py."""
+    return ("// sci (Sci-Harness) hooks for OpenCode, written by `install.py --hooks`; `install.py --remove-hooks`\n"
+            "// removes this file. The hooks live in the installed skill: %s\n"
+            "import sci from %s;\n\nexport default sci(%s);\n"
+            % (tilde(home_dir / "scripts" / OPENCODE_TAG), json.dumps((home_dir / "scripts" / OPENCODE_TAG).as_uri()),
+               json.dumps(python_argv())))
+
+
+def opencode_plugin_ours():
+    try:
+        return OPENCODE_TAG in OPENCODE_PLUGIN.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return False
+
+
+def set_opencode_hooks(plan, home_dir, on):
+    p = OPENCODE_PLUGIN
+    if on:
+        if p.exists() and not opencode_plugin_ours():
+            plan.say("  SKIPPED: %s exists and is not ours; OpenCode hooks not added" % tilde(p))
+            return
+        text = opencode_plugin_text(home_dir)
+        if not plan.dry and (not p.exists() or p.read_text(encoding="utf-8") != text):
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text, encoding="utf-8")
+        plan.say("  OpenCode hooks on: %s" % tilde(p))
+    elif opencode_plugin_ours():
+        if not plan.dry:
+            p.unlink()
+        plan.say("  OpenCode hooks off: removed %s" % tilde(p))
+
+
 def chosen_agents(args):
     if args.only:
         names = [x.strip() for x in args.only.split(",") if x.strip()]
@@ -534,6 +589,8 @@ def apply_hooks(plan, home_dir, agents, on):
             set_hooks(plan, GEMINI_SETTINGS, gemini_hooks(home_dir), "Gemini CLI", on)
         elif kind == "antigravity":
             set_agy_hooks(plan, home_dir, on)
+        elif kind == "opencode":
+            set_opencode_hooks(plan, home_dir, on)
 
 
 def cmd_install(args, prefix, home_dir):
@@ -666,6 +723,7 @@ def cmd_status(args, prefix, home_dir):
         if label == "Codex" and n and not codex_hooks_enabled():
             extra = "  (turned off: config.toml has [features] hooks = false)"
         print("  %-12s %-34s %s%s" % (label, tilde(path), ("on (%d handlers)" % n) if n else "off", extra))
+    print("  %-12s %-34s %s" % ("OpenCode", tilde(OPENCODE_PLUGIN), "on (plugin)" if opencode_plugin_ours() else "off"))
     print("detected agents: " + (", ".join(a for a in AGENTS if detected(a)) or "none"))
     return 0
 

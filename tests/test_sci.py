@@ -1115,6 +1115,38 @@ class TestFailedVerify(unittest.TestCase):
         self.assertIn("PASS regression T1: reused", sb.ok("verify"))
         sb.ok("done", "-m", "T2")
 
+    def test_a_rerun_during_a_check_that_rewrites_a_file_saves_its_pass_for_the_ignored_tree(self):
+        sb = Sandbox(self)
+        sb.write("pkg/calc.py", "def add(a, b):\n    return a + b\n")
+        sb.write("tests/test_add.py", ADD_TEST)
+        sb.git("add", "-A")
+        sb.git("commit", "-q", "-m", "add")
+        sb.init()
+        sb.ok("task", "add", "add works", "--verify", "%s tests.test_add -q" % UT, "--scope", "pkg/calc.py")
+        out_cmd = ("%s -c \"import pkg.calc as c; c.add(0, 0) == 0 and hasattr(c, 'mul') and "
+                   "open('out.json', 'w').write('2')\"" % PYQ)
+        sb.ok("task", "add", "mul", "--verify", "%s && %s tests.test_mul -q" % (out_cmd, UT), "--scope", "pkg/calc.py")
+        for c in (("task", "start"), ("check",), ("lock",), ("verify",), ("done", "-m", "T1")):
+            sb.ok(*c)
+        sb.ok("task", "start")
+        sb.write("tests/test_mul.py", MUL_TEST)
+        sb.sci("check")
+        sb.ok("lock")
+        sb.write("pkg/calc.py", self.calc(1))
+        sb.ok("check")
+        rc, out = sb.sci("verify")
+        self.assertEqual(rc, 1, out)
+        sb.write("pkg/calc.py", self.calc(0))
+        sb.write("out.json", "1")  # an untracked file, until the check rewrites it: then sci ignores it as output
+        out = sb.ok("check")
+        self.assertIn("PASS regression T1", out)
+        self.assertIn("sci ignores it from now on", out)
+        store = sci.Store(sci.Repo(sb.root))
+        st, cfg = store.load()
+        cmd = "%s tests.test_add -q" % UT  # its PASS is saved for the files as they are once the output is ignored
+        self.assertEqual(st["passes"]["cmd:" + cmd]["fp"], sci.step_fp(store, sci.snapshot(store.repo, cfg)[0], cmd))
+        self.assertIn("PASS regression T1: reused", sb.ok("verify"))
+
     def test_restarting_a_task_forgets_its_old_verify_failure(self):
         sb = Sandbox(self)
         self._regressed(sb)
@@ -1519,8 +1551,17 @@ class TestUnits(unittest.TestCase):
         sep = "\n%s\n" % sci.REGION_SEP
         self.assertEqual([r.splitlines()[0] for r in sci.test_region_text("src/lib.rs", src).split(sep)],
                          ['#[cfg(feature = "slow")]', "#[ignore]"])
-        self.assertEqual([r.splitlines()[0] for r in sci.test_region_text("src/lib.rs", src, legacy=True).split(sep)],
+        self.assertEqual([r.splitlines()[0] for r in sci.test_region_text("src/lib.rs", src, v=1).split(sep)],
                          ["#[cfg(test)]", "#[test]"])
+
+    def test_proptest_blocks_start_at_their_first_attribute(self):
+        src = ('pub fn f() {}\n\n#[cfg(any())]\nproptest! {\n    #[test]\n    fn p(x in 0..9u8) { assert!(x < 9); }\n}\n\n'
+               '#[cfg(feature = "never")]\n::proptest::proptest! {\n    #[test]\n    fn q(x in 0..9u8) { assert!(x < 9); }\n}\n')
+        sep = "\n%s\n" % sci.REGION_SEP
+        self.assertEqual([r.splitlines()[0] for r in sci.test_region_text("src/lib.rs", src).split(sep)],
+                         ["#[cfg(any())]", '#[cfg(feature = "never")]'])
+        self.assertEqual([r.splitlines()[0] for r in sci.test_region_text("src/lib.rs", src, v=2).split(sep)],
+                         ["proptest! {", "::proptest::proptest! {"])
 
     def test_rust_lexer_escaped_quotes_and_c_strings(self):
         self.assertNotIn("{", sci.rust_mask("let v = ['\\'','{'];"))
@@ -1572,6 +1613,11 @@ class TestUnits(unittest.TestCase):
                          "npx vitest run src/math.test.ts")
         self.assertEqual(sci.narrow_suite("node --test", ["test/cart.test.mjs > totals"], files),
                          "node --test test/cart.test.mjs")
+        self.assertEqual(sci.narrow_suite("npx jest --ci ./src/", ["src/cart.test.ts"], files), "npx jest --ci src/cart.test.ts")
+        self.assertEqual(sci.narrow_suite("npx vitest run src", ["src/math.test.ts > adds"], files),
+                         "npx vitest run src/math.test.ts")
+        self.assertEqual(sci.narrow_suite("npx jest --rootDir src", ["src/cart.test.ts"], files),
+                         "npx jest --rootDir src src/cart.test.ts")  # a flag's value stays
         self.assertIsNone(sci.narrow_suite("npx jest", ["src/gone.test.ts"], files))  # not a file sci knows
         self.assertIsNone(sci.narrow_suite("npx jest", [], files))
         d = tempfile.mkdtemp()
@@ -1582,6 +1628,8 @@ class TestUnits(unittest.TestCase):
             self.assertIsNone(sci.narrow_suite("npm test", ["src/cart.test.ts"], files))  # no package.json
             Path(d, "package.json").write_text('{"scripts": {"test": "jest --ci"}}', encoding="utf-8")
             self.assertEqual(sci.narrow_suite("npm test", ["src/cart.test.ts"], files), "npm test -- src/cart.test.ts")
+            self.assertEqual(sci.narrow_suite("npm test -- src", ["src/cart.test.ts"], files), "npm test -- src/cart.test.ts")
+            self.assertEqual(sci.narrow_suite("bun run test", ["src/cart.test.ts"], files), "bun run test -- src/cart.test.ts")
             Path(d, "package.json").write_text('{"scripts": {"test": "mocha"}}', encoding="utf-8")
             self.assertIsNone(sci.narrow_suite("npm test", ["src/cart.test.ts"], files))
         finally:
@@ -2299,6 +2347,67 @@ class TestFreshStart(unittest.TestCase):
         sb.ok("task", "start", "T1")
         self.assertEqual(sb.state()["tasks"][0]["resets"], 0)
 
+    def test_a_fresh_start_after_a_manual_revert_costs_no_strike(self):
+        sb = Sandbox(self)
+        sb.init()
+        sb.add_rk2_task()
+        sb.ok("task", "start")
+        start = sb.read("pkg/core.py")
+        sb.write_rk2_test()
+        sb.sci("check")
+        sb.ok("lock")
+        for i in range(3):
+            sb.write_rk2(good=False)
+            sb.write("pkg/core.py", sb.read("pkg/core.py") + "\n# attempt %d\n" % i)
+            sb.sci("check")
+        sb.write("pkg/core.py", start)  # reverted by hand: nothing left for restore to do
+        out = sb.ok("restore", "--to", "start")
+        self.assertIn("Nothing to restore", out)
+        self.assertIn("Strikes reset", out)
+        sb.sci("check")  # fails as at the start, but is no fix attempt
+        self.assertEqual(sb.state()["tasks"][0]["strikes"], 0)
+
+    def test_code_changed_while_stop_is_on_is_counted_for_the_human(self):
+        sb = Sandbox(self)
+        sb.init()
+        sb.add_rk2_task()
+        sb.ok("task", "start")
+        sb.write_rk2_test()
+        sb.sci("check")
+        sb.ok("lock")
+        for i in range(4):
+            sb.write_rk2(good=False)
+            sb.write("pkg/core.py", sb.read("pkg/core.py") + "\n# attempt %d\n" % i)
+            rc, out = sb.sci("check")
+        self.assertIn("note: the code changed while STOP was on (1 time(s) in T1)", out)
+        sb.sci("check")  # nothing changed: not counted
+        self.assertEqual(sb.state()["tasks"][0]["stop_edits"], 1)
+        out = sb.ok("report")
+        self.assertIn("Code changed while STOP was on", out)
+        self.assertIn("- T1: 1 time(s)", out)
+
+    def test_state_and_config_changed_outside_sci_are_flagged_once(self):
+        sb = Sandbox(self)
+        sb.init()
+        sb.add_rk2_task()
+        sb.ok("task", "start")
+        st = sb.state()
+        st["tasks"][0]["strikes"] = 2
+        sb.write(".sci/state.json", json.dumps(st, indent=2))
+        cfg = json.loads(sb.read(".sci/config.json"))
+        cfg["ignore_globs"] = list(cfg.get("ignore_globs") or []) + ["tests/**"]
+        sb.write(".sci/config.json", json.dumps(cfg))
+        out = sb.ok("resume")
+        self.assertIn("WARNING: state.json (T1.strikes) was changed outside sci", out)
+        self.assertIn("WARNING: config.json (ignore_globs) was changed outside sci", out)
+        self.assertEqual([r["kind"] for r in sb.state()["review"]], ["edited-outside-sci"] * 2)
+        out = sb.ok("resume")
+        self.assertNotIn("outside sci", out)
+        self.assertIn("changed without a sci command", sb.ok("report"))
+        st = sb.state()
+        sb.write(".sci/state.json", json.dumps(st))  # the same content, written differently
+        self.assertNotIn("outside sci", sb.ok("resume"))
+
     def test_a_test_locked_then_unlocked_in_a_task_is_protected_after_done(self):
         sb = Sandbox(self)
         sb.init()
@@ -2412,7 +2521,7 @@ class TestRustGuard(unittest.TestCase):
         sb.ok("lock", "src/lib.rs")
         st = sb.state()
         disk = sci.read_text(sb.root / "src" / "lib.rs")  # as sci reads it (CRLF on Windows)
-        legacy = sci.sha256_text(sci.test_region_text("src/lib.rs", disk, legacy=True))
+        legacy = sci.sha256_text(sci.test_region_text("src/lib.rs", disk, v=1))
         new = st["tasks"][0]["locked_regions"]["src/lib.rs"]
         self.assertNotEqual(legacy, new)
         st["tasks"][0]["locked_regions"]["src/lib.rs"] = legacy  # as sci 3.4.0 recorded it
@@ -2420,8 +2529,26 @@ class TestRustGuard(unittest.TestCase):
         sb.write(".sci/state.json", json.dumps(st))
         sb.ok("check")
         st = sb.state()
-        self.assertEqual((st["regions_v"], st["tasks"][0]["locked_regions"]["src/lib.rs"]), (2, new))
+        self.assertEqual((st["regions_v"], st["tasks"][0]["locked_regions"]["src/lib.rs"]), (3, new))
         sb.write("src/lib.rs", lib.replace("#[allow(clippy::float_cmp)]", '#[cfg(feature = "never")]'))
+        rc, out = sb.sci("check")
+        self.assertIn("LOCKED TESTS CHANGED: src/lib.rs", out)
+
+    def test_regions_recorded_by_341_are_upgraded_without_flagging(self):
+        lib = RUST_LIB + "\n#[allow(unused)]\nproptest! {\n    #[test]\n    fn p(x in 0..9u8) { assert!(x < 9); }\n}\n"
+        sb = self.crate(lib)
+        sb.ok("lock", "src/lib.rs")
+        st = sb.state()
+        disk = sci.read_text(sb.root / "src" / "lib.rs")
+        old = sci.sha256_text(sci.test_region_text("src/lib.rs", disk, v=2))
+        new = st["tasks"][0]["locked_regions"]["src/lib.rs"]
+        self.assertNotEqual(old, new)
+        st["tasks"][0]["locked_regions"]["src/lib.rs"], st["regions_v"] = old, 2  # as sci 3.4.1 recorded it
+        sb.write(".sci/state.json", json.dumps(st))
+        sb.ok("check")
+        st = sb.state()
+        self.assertEqual((st["regions_v"], st["tasks"][0]["locked_regions"]["src/lib.rs"]), (3, new))
+        sb.write("src/lib.rs", lib.replace("#[allow(unused)]", "#[cfg(any())]"))
         rc, out = sb.sci("check")
         self.assertIn("LOCKED TESTS CHANGED: src/lib.rs", out)
 
@@ -2481,6 +2608,21 @@ class TestHooks(unittest.TestCase):
             self.assertIsNotNone(sci_hook.destructive_reason(c), c)
         for c in good:
             self.assertIsNone(sci_hook.destructive_reason(c), c)
+
+    def test_opencode_modes(self):
+        sb = Sandbox(self)
+        sb.init(objective="Ship the parser")
+        root = str(sb.root)
+        deny = json.loads(self.hook("opencode-pre-tool", {"cwd": root, "tool_input": {"command": "git stash"}}))
+        self.assertIn("Blocked by the sci harness: `git stash`", deny["deny"])
+        self.assertEqual(json.loads(self.hook("opencode-pre-tool", {"cwd": root, "tool_input": {"command": "ls"}})), {})
+        brief = json.loads(self.hook("opencode-context", {"cwd": root}))["system"]
+        self.assertIn("Ship the parser", brief)
+        self.assertIn("after any summary or compaction", brief)
+        neutral = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, neutral, True)
+        for mode in ("opencode-context", "opencode-pre-tool"):
+            self.assertEqual(json.loads(self.hook(mode, {"cwd": neutral, "tool_input": {"command": "git stash"}})), {})
 
     def test_windows_shell_deletes_and_file_uris(self):
         for c in ("Remove-Item -Recurse -Force .sci", "rd /s /q .sci", "del .sci\\state.json",

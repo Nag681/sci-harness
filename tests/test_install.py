@@ -101,7 +101,7 @@ class TestInstall(unittest.TestCase):
         for rel in (".claude/skills/" + NAME, ".agents/skills/" + NAME):
             h.assert_provides(self, rel)
         plugin = h.p(".gemini/config/plugins/" + NAME)
-        self.assertEqual(json.loads((plugin / "plugin.json").read_text(encoding="utf-8"))["version"], "3.4.1")
+        self.assertEqual(json.loads((plugin / "plugin.json").read_text(encoding="utf-8"))["version"], "3.4.2")
         self.assertTrue((plugin / "skills" / NAME / "SKILL.md").is_file())
         self.assertFalse((plugin / "hooks.json").exists())
         self.assertFalse(h.p(".claude/settings.json").exists())
@@ -158,6 +158,29 @@ class TestInstall(unittest.TestCase):
         for rel in (".claude/skills/" + NAME, ".agents/skills/" + NAME, ".gemini/config/plugins/" + NAME,
                     ".local/share/agent-skills/" + NAME):
             self.assertFalse(os.path.lexists(str(h.p(rel))), rel)
+
+    def test_opencode_hooks_are_a_plugin_file_that_imports_the_installed_copy(self):
+        h = Home(self, agents=("opencode",))
+        plugin = h.p(".config/opencode/plugins/%s.js" % NAME)
+        h.run()
+        self.assertFalse(plugin.exists())  # no hooks unless asked for
+        h.run("--hooks")
+        text = plugin.read_text(encoding="utf-8")
+        module = h.p(".local/share/agent-skills/%s/scripts/opencode_plugin.mjs" % NAME)
+        self.assertTrue(module.is_file())
+        self.assertIn("import sci from %s;" % json.dumps(module.as_uri()), text)
+        argv = json.loads(re.search(r"export default sci\((.*)\);", text).group(1))
+        self.assertTrue(Path(argv[0]).is_absolute(), argv)  # OpenCode's service may not have the terminal's PATH
+        self.assertIn("on (plugin)", h.run("--status"))
+        h.run()  # a plain re-install keeps it
+        self.assertEqual(plugin.read_text(encoding="utf-8"), text)
+        h.run("--remove-hooks")
+        self.assertFalse(plugin.exists())
+        self.assertTrue(h.p(".agents/skills/%s/SKILL.md" % NAME).exists())
+        plugin.write_text("export default {};\n", encoding="utf-8")  # someone else's plugin of the same name
+        self.assertIn("is not ours", h.run("--hooks"))
+        h.run("--uninstall")
+        self.assertEqual(plugin.read_text(encoding="utf-8"), "export default {};\n")
 
     def test_remove_hooks_keeps_skill(self):
         h = Home(self)

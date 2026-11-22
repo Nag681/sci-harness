@@ -5,9 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [3.4.2] - 2026-11-22
+
+Fixes from a third review by Gemini, this time of 3.4.1, and hooks for OpenCode. Each fix was reproduced
+before it was made and has a test that fails without it.
+
+### Added
+- OpenCode hooks. `install.py --hooks` writes `~/.config/opencode/plugins/sci.js`, a plugin that imports
+  `scripts/opencode_plugin.mjs` from the installed skill. On OpenCode 1.x (1.18.29 and newer) and 2.x it blocks
+  the same destructive commands as the other agents' hooks, and the model reads why. It also puts the objective
+  and the next step into every request's system prompt, so compaction cannot drop them. `--remove-hooks` and
+  `--uninstall` delete the file, and a `sci.js` that the installer did not write is left alone. Checked live on
+  OpenCode 2.0.31 with a stand-in model; OpenCode 1.x is checked only against a stand-in of its plugin API.
+- When `.sci/state.json` or `.sci/config.json` was edited by hand rather than by a sci command, sci now warns and
+  lists the changed fields for the human (for example `T2.strikes` or `ignore_globs`). Nothing is blocked.
+- Code changed while STOP is on is counted. The check says so, and `report` lists the count for the human.
+  STOP still does not block a check.
+
+### Fixed
+- Rust: an attribute such as `#[cfg(any())]` above a `proptest!` block outside a test module lay outside the
+  locked region, so it could switch those tests off unnoticed. 3.4.1 had fixed this for `#[test]` and
+  `#[cfg(test)]` only. Paths such as `proptest::proptest!` count too. Regions recorded by 3.4.1 are upgraded
+  when sci loads the state, and the upgrade flags nothing.
+- `restore --to start` when the files already matched the start (reverted by hand) reset the strikes. The check
+  that confirms the state then counted as a fix attempt, and Strike 1 was used up at once.
+- A check that rewrote an untracked file, which sci then ignored as output, saved the pass of a rerun with the
+  files as they were before. `verify` could not reuse that pass later.
+- Rerunning only the failing jest, vitest, `node --test` or `bun test` files kept a folder the suite command
+  named, as in `npx jest tests/ tests/cart.test.ts`, and those runners then ran the whole folder again.
+  Folders and files that hold the failing tests are now left out. A flag's value, as in `--rootDir src`, stays.
 
 ### Changed
+- The skill description says when to use sci in its first sentence and that it is not for one-line edits,
+  questions or read-only exploration.
 - The README is written for anyone who uses a coding agent, not just developers, in plain Markdown: what goes
   wrong on long jobs, how Sci-Harness catches it, and a one-line install. The technical material (the rules,
   commands, settings, install options, hooks and Windows notes) moved to `docs/how-it-works.md`.

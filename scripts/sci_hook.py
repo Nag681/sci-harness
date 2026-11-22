@@ -7,6 +7,8 @@ install globally. Never fails: on any error it prints the harness's neutral answ
   sci_hook.py agy-session-start | agy-pre-invocation | agy-pre-tool | agy-stop      (Antigravity CLI/IDE)
   sci_hook.py claude-session-start | claude-prompt | claude-pre-tool                (Claude Code, Codex CLI)
   sci_hook.py gemini-session-start | gemini-before-agent | gemini-before-tool       (Gemini CLI)
+  sci_hook.py opencode-context | opencode-pre-tool                                   (OpenCode, through
+                                                                                     scripts/opencode_plugin.mjs)
   sci_hook.py plain [DIR]                                                           (anything else)
 
 The hook payload (JSON) is read from stdin when present.
@@ -93,6 +95,13 @@ def anchor(st):
 def briefing(root, st):
     return ("[sci] Long-horizon harness active in %s. The plan and progress live in .sci/ (your memory may be "
             "summarized; trust .sci). Run `.sci/sci resume` before acting.\n%s" % (root, anchor(st)))
+
+
+def standing_briefing(root, st):
+    """The briefing for a system prompt, which every request of the session repeats."""
+    return ("[sci] Long-horizon harness active in %s. The plan and progress live in .sci/ (your memory may be "
+            "summarized; trust .sci). Run `.sci/sci resume` when you start, after any summary or compaction, and "
+            "whenever you are unsure.\n%s" % (root, anchor(st)))
 
 
 QUOTED_RE = re.compile(r'"((?:\\.|[^"\\])*)"|\'([^\']*)\'')
@@ -262,7 +271,7 @@ def main(argv):
         except Exception:
             pass
     payload = read_payload()
-    json_neutral = mode.startswith(("agy-", "gemini-"))  # these harnesses expect a JSON object on stdout
+    json_neutral = mode.startswith(("agy-", "gemini-", "opencode-"))  # these expect a JSON object on stdout
     try:
         root, st = active_state(payload, extra)
         if mode == "plain":
@@ -298,6 +307,11 @@ def main(argv):
         elif mode == "gemini-before-tool":
             reason = destructive_reason(tool_command(payload)) if st else None
             res = {"decision": "deny", "reason": DENY_TEXT % reason} if reason else {}
+        elif mode == "opencode-context":
+            res = {"system": standing_briefing(root, st)} if st else {}
+        elif mode == "opencode-pre-tool":
+            reason = destructive_reason(tool_command(payload)) if st else None
+            res = {"deny": DENY_TEXT % reason} if reason else {}
         else:
             res = {} if json_neutral else None
         if res is not None:
