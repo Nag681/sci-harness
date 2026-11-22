@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 470" width="1200" height="470" role="img" aria-label="Sci-Harness, for coding agents. Give your agent a big coding job. Get it done right. A rope runs up a mountain through anchors; every step is checked and saved, and a slip is caught at the last saved step.">
+<defs><clipPath id="frame"><rect x="1" y="1" width="1198" height="468" rx="28"/></clipPath></defs>
+<rect x="1" y="1" width="1198" height="468" rx="28" fill="#f4f6f8" stroke="#d8dee4" stroke-width="2"/>
+<g clip-path="url(#frame)">
+<path d="M560 470 L700 330 L760 365 L860 230 L905 262 L985 120 L1040 175 L1085 150 L1200 260 L1200 470 Z" fill="#dfe5ea"/>
+<path d="M640 470 L780 360 L830 380 L935 250 L985 120 L1010 200 L1090 300 L1200 340 L1200 470 Z" fill="#cdd5dd"/>
+<path d="M760 470 L880 400 L960 420 L1060 350 L1200 410 L1200 470 Z" fill="#bcc6cf"/>
+</g>
+<path d="M700 440 Q763 412 790 385 Q809 357 865 330 Q877 299 925 268 Q958 236 955 205 Q952 177 985 150" fill="none" stroke="#e8590c" stroke-width="4" stroke-linecap="round" stroke-dasharray="1 0"/>
+<path d="M985 136V74" stroke="#17212b" stroke-width="3" stroke-linecap="round"/>
+<path d="M986 74 l46 14 -46 14z" fill="#1a7f37"/>
+<text x="1043" y="98" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="20" font-weight="700" fill="#17212b" text-anchor="start">Done</text>
+<circle cx="700" cy="440" r="14" fill="#1a7f37" stroke="#f4f6f8" stroke-width="3.5"/>
+<path d="M694 440 l4 4 7-8" fill="none" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="790" cy="385" r="14" fill="#1a7f37" stroke="#f4f6f8" stroke-width="3.5"/>
+<path d="M784 385 l4 4 7-8" fill="none" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="865" cy="330" r="14" fill="#1a7f37" stroke="#f4f6f8" stroke-width="3.5"/>
+<path d="M859 330 l4 4 7-8" fill="none" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="925" cy="268" r="14" fill="#1a7f37" stroke="#f4f6f8" stroke-width="3.5"/>
+<path d="M919 268 l4 4 7-8" fill="none" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="955" cy="205" r="13" fill="#ffffff" stroke="#e8590c" stroke-width="4"/>
+<rect x="975" y="196" width="40" height="32" rx="10" fill="none" stroke="#8b96a1" stroke-width="2.6" stroke-dasharray="3 4"/><path d="M995 196v-7" stroke="#8b96a1" stroke-width="2.6" stroke-linecap="round" stroke-dasharray="3 4"/>
+<path d="M1017 215 Q1029 269 977 322" fill="none" stroke="#8b96a1" stroke-width="2.2" stroke-dasharray="3 6" stroke-linecap="round"/>
+<path d="M925 268 L953 306" stroke="#e8590c" stroke-width="3" stroke-linecap="round"/>
+<rect x="933" y="313" width="40" height="32" rx="10" fill="#ffffff" stroke="#17212b" stroke-width="2.6"/><path d="M953 313v-7" stroke="#17212b" stroke-width="2.6" stroke-linecap="round"/><circle cx="946" cy="329" r="3" fill="#17212b"/><circle cx="960" cy="329" r="3" fill="#17212b"/>
+<text x="989" y="326" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="18" font-weight="600" fill="#17212b" text-anchor="start">A slip is caught</text>
+<text x="989" y="350" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="18" font-weight="400" fill="#57626e" text-anchor="start">at the last saved step.</text>
+<text x="820" y="411" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="18" font-weight="600" fill="#17212b" text-anchor="start">Every step checked</text>
+<text x="820" y="435" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="18" font-weight="400" fill="#57626e" text-anchor="start">and saved.</text>
+<text x="72" y="132" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#e8590c" text-anchor="start" letter-spacing="3">FOR CODING AGENTS</text>
+<text x="68" y="214" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="78" font-weight="800" fill="#17212b" text-anchor="start" letter-spacing="-2">Sci-Harness</text>
+<text x="72" y="282" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="30" font-weight="500" fill="#17212b" text-anchor="start">Give your agent a big coding job.</text>
+<text x="72" y="324" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="30" font-weight="500" fill="#17212b" text-anchor="start">Get it done right.</text>
+<path d="M74 350 H330" stroke="#e8590c" stroke-width="4" stroke-linecap="round"/>
+<text x="72" y="400" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="18" font-weight="400" fill="#57626e" text-anchor="start">Free · works offline · Claude Code, Codex, Gemini and more</text>
+</svg>

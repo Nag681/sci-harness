@@ -35,7 +35,7 @@ HOOK_TAG = "sci_hook.py"    # identifies our entries in agent hook configs
 STAMP = time.strftime("%Y%m%d-%H%M%S")
 # Repository files that agents do not need: kept out of every installed copy.
 IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".git", ".github", ".gitignore", ".gitattributes",
-                                ".pytest_cache", ".sci", "tests", "install.sh", "install.ps1", MARK)
+                                ".pytest_cache", ".sci", "tests", "docs", "install.sh", "install.ps1", MARK)
 
 
 def skill_meta(d):

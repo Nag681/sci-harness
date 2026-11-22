@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 924 498" width="924" height="498" role="img" aria-label="Good to know. No coding needed: You describe the job. Your agent does the rest. Stays on your computer: Your code is never sent anywhere. Free and open source: No account, no sign-up. MIT license. Fine for messy projects: Old problems are noted first, so only new ones count. Barely slower: It re-checks only what changed. Works with your agent: Claude Code, Codex, Gemini CLI, Antigravity, OpenCode and pi.">
+<rect x="1" y="1" width="448" height="148" rx="20" fill="#f6f8fa" stroke="#d8dee4" stroke-width="1.5"/>
+<rect x="26" y="30" width="56" height="56" rx="14" fill="#fdeadb"/>
+<g transform="translate(37 41) scale(1.417)" fill="none" stroke="#e8590c" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z"/><path d="M8 9.5h8M8 12.5h5"/></g>
+<text x="104" y="58" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="25" font-weight="700" fill="#17212b" text-anchor="start">No coding needed</text>
+<text x="104" y="92" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="20" font-weight="400" fill="#57626e" text-anchor="start">You describe the job.</text>
+<text x="104" y="120" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="20" font-weight="400" fill="#57626e" text-anchor="start">Your agent does the rest.</text>
+<rect x="475" y="1" width="448" height="148" rx="20" fill="#f6f8fa" stroke="#d8dee4" stroke-width="1.5"/>
+<rect x="500" y="30" width="56" height="56" rx="14" fill="#fdeadb"/>
+<g transform="translate(511 41) scale(1.417)" fill="none" stroke="#e8590c" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11.5 12 4l8 7.5"/><path d="M6 10v10h12V10"/><path d="M10 20v-5h4v5"/></g>
+<text x="578" y="58" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="25" font-weight="700" fill="#17212b" text-anchor="start">Stays on your computer</text>
+<text x="578" y="92" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="20" font-weight="400" fill="#57626e" text-anchor="start">Your code is never</text>
+<text x="578" y="120" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="20" font-weight="400" fill="#57626e" text-anchor="start">sent anywhere.</text>
+<rect x="1" y="175" width="448" height="148" rx="20" fill="#f6f8fa" stroke="#d8dee4" stroke-width="1.5"/>
+<rect x="26" y="204" width="56" height="56" rx="14" fill="#fdeadb"/>
+<g transform="translate(37 215) scale(1.417)" fill="none" stroke="#e8590c" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="8" width="17" height="4.5" rx="1"/><path d="M5.5 12.5V20h13v-7.5M12 8v12"/><path d="M12 8C10.5 4.5 7 4 7 6.2S10 8 12 8zM12 8c1.5-3.5 5-4 5-1.8S14 8 12 8z"/></g>
+<text x="104" y="232" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="25" font-weight="700" fill="#17212b" text-anchor="start">Free and open source</text>
+<text x="104" y="266" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="20" font-weight="400" fill="#57626e" text-anchor="start">No account, no sign-up.</text>
+<text x="104" y="294" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="20" font-weight="400" fill="#57626e" text-anchor="start">MIT license.</text>
+<rect x="475" y="175" width="448" height="148" rx="20" fill="#f6f8fa" stroke="#d8dee4" stroke-width="1.5"/>
+<rect x="500" y="204" width="56" height="56" rx="14" fill="#fdeadb"/>
+<g transform="translate(511 215) scale(1.417)" fill="none" stroke="#e8590c" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12a8 8 0 1 0 2.4-5.7"/><path d="M4 4v4h4"/><path d="M12 8v4.5l3 2"/></g>
+<text x="578" y="232" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="25" font-weight="700" fill="#17212b" text-anchor="start">Fine for messy projects</text>
+<text x="578" y="266" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="20" font-weight="400" fill="#57626e" text-anchor="start">Old problems are noted first,</text>
+<text x="578" y="294" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="20" font-weight="400" fill="#57626e" text-anchor="start">so only new ones count.</text>
+<rect x="1" y="349" width="448" height="148" rx="20" fill="#f6f8fa" stroke="#d8dee4" stroke-width="1.5"/>
+<rect x="26" y="378" width="56" height="56" rx="14" fill="#fdeadb"/>
+<g transform="translate(37 389) scale(1.417)" fill="none" stroke="#e8590c" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 3 5 14h6l-1 7 8-11h-6z"/></g>
+<text x="104" y="406" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="25" font-weight="700" fill="#17212b" text-anchor="start">Barely slower</text>
+<text x="104" y="440" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="20" font-weight="400" fill="#57626e" text-anchor="start">It re-checks only</text>
+<text x="104" y="468" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="20" font-weight="400" fill="#57626e" text-anchor="start">what changed.</text>
+<rect x="475" y="349" width="448" height="148" rx="20" fill="#f6f8fa" stroke="#d8dee4" stroke-width="1.5"/>
+<rect x="500" y="378" width="56" height="56" rx="14" fill="#fdeadb"/>
+<g transform="translate(511 389) scale(1.417)" fill="none" stroke="#e8590c" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v5M15 3v5"/><path d="M6 8h12v3a6 6 0 0 1-12 0z"/><path d="M12 17v4"/></g>
+<text x="578" y="406" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="25" font-weight="700" fill="#17212b" text-anchor="start">Works with your agent</text>
+<text x="578" y="440" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="20" font-weight="400" fill="#57626e" text-anchor="start">Claude Code, Codex, Gemini CLI,</text>
+<text x="578" y="468" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="20" font-weight="400" fill="#57626e" text-anchor="start">Antigravity, OpenCode and pi.</text>
+</svg>

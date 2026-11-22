@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- The README is written for anyone who uses a coding agent, not just developers: what goes wrong on long jobs,
+  how Sci-Harness catches it, one evening's job as a timeline, and a one-line install. The technical material
+  (the rules, commands, settings, install options, hooks and Windows notes) moved to `docs/how-it-works.md`.
+- The installer no longer copies `docs/` into installed skills.
+
 ## [3.4.1] - 2026-11-22
 
 Fixes for a second review by Gemini, this time of 3.4.0. The most serious finding was a regression in 3.4.0

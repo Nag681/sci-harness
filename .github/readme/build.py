@@ -1,295 +1,319 @@
-"""Draws the README's images and checks its quoted output.
+"""Draws the README's pictures, each in a light and a dark version: the hero, the slips and how they are caught,
+one evening's job as a timeline, how you use it, and the good-to-know tiles.
 
-Without arguments, it draws the banner in a light and a dark version. Given the transcript of demo.sh, it also
-draws the README's terminal pictures from it, saves it as session.txt, and fails if a line in one of the
-README's console blocks is not in the transcript (timings and hashes aside), so every quote stays real output.
+  python3 .github/readme/build.py
 
-  sh .github/readme/demo.sh > demo.txt && python3 .github/readme/build.py demo.txt
+The visual idea is the project's name: a climbing harness. Every finished step is an anchor on the rope, so a
+slip costs one step, never the whole climb. Pictures use system fonts only, because GitHub shows SVG files as
+images, which cannot load web fonts.
 """
-import re
-import sys
 from pathlib import Path
 from xml.sax.saxutils import escape
 
-HERE = Path(__file__).resolve().parent
 SANS = "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif"
-MONO = "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace"
-NO_LIGATURES = "font-variant-ligatures:none;font-feature-settings:'liga' 0,'calt' 0"  # Fira Code draws === as one glyph
 
+# Granite neutrals with a slight blue bias; one bold accent, the rope. Green and red only mean pass and fail.
 THEMES = {
-    "light": dict(top="#ffffff", bottom="#f6f8fa", border="#d0d7de", fg="#1f2328", muted="#57606a",
-                  line="#afb8c1", accent="#0969da", wordmark=("#0969da", "#8250df"), tint=0.09,
-                  steps=["#57606a", "#cf222e", "#9a6700", "#0969da", "#1a7f37", "#8250df"]),
-    "dark": dict(top="#0d1117", bottom="#161b22", border="#30363d", fg="#e6edf3", muted="#8b949e",
-                 line="#484f58", accent="#58a6ff", wordmark=("#58a6ff", "#a371f7"), tint=0.16,
-                 steps=["#8b949e", "#f85149", "#d29922", "#58a6ff", "#3fb950", "#a371f7"]),
+    "light": dict(panel="#f4f6f8", card="#f6f8fa", line="#d8dee4", ink="#17212b", muted="#57626e", faint="#8b96a1",
+                  rope="#e8590c", ropesoft="#fdeadb", ok="#1a7f37", oksoft="#dcf2e2", bad="#b42318",
+                  badsoft="#fbe4e1", grey="#eaeef2", rock="#dfe5ea", rock2="#cdd5dd", rock3="#bcc6cf",
+                  sky="#ffffff"),
+    "dark": dict(panel="#11171e", card="#151b23", line="#2a333d", ink="#e6edf3", muted="#9ba6b1", faint="#6c7885",
+                 rope="#ff8a3d", ropesoft="#3b2415", ok="#3fb950", oksoft="#14301d", bad="#f47067",
+                 badsoft="#3a1d1c", grey="#1f2730", rock="#1c242d", rock2="#25303b", rock3="#2f3b47",
+                 sky="#0d1117"),
 }
 
-# 24x24 line icons, drawn for this banner.
+# 24x24 line icons.
 ICONS = {
-    "plan": '<path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/>',
-    "test": '<path d="M9 3h6M10 3v6.2L4.7 18.4A1.75 1.75 0 0 0 6.2 21h11.6a1.75 1.75 0 0 0 1.5-2.6L14 9.2V3'
-            'M6.7 15h10.6"/>',
+    "forget": '<path d="M20 11.5a8 8 0 0 1-11.6 7.1L4 19.8l1.1-4.2A8 8 0 1 1 20 11.5z"/>'
+              '<path d="M9.8 9.2a2.3 2.3 0 1 1 3.3 2.1c-.7.4-1.1.9-1.1 1.7M12 15.6h.01"/>',
+    "lowered": '<path d="M5 3v18M19 3v18M5 16h14"/><path d="M12 5v6.5M9.5 9 12 11.5 14.5 9"/>',
+    "circles": '<path d="M19.5 12a7.5 7.5 0 0 1-13.2 4.9M4.5 12a7.5 7.5 0 0 1 13.2-4.9"/>'
+               '<path d="M18 3.5v4h-4M6 20.5v-4h4"/>',
+    "broken": '<path d="M11 4H6.5A2.5 2.5 0 0 0 4 6.5v11A2.5 2.5 0 0 0 6.5 20H10M14 4h3.5A2.5 2.5 0 0 1 20 6.5v11'
+              'a2.5 2.5 0 0 1-2.5 2.5H13"/><path d="M12.5 4 10.5 9l3 3-2.5 4 1.5 4"/>',
+    "plan": '<rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V2.8h6V4"/>'
+            '<path d="M8.5 10l1.3 1.3 2.2-2.3M14 10.5h2M8.5 15.5l1.3 1.3 2.2-2.3M14 16h2"/>',
     "lock": '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4M12 15v2"/>',
-    "fix": '<path d="M17 3l4 4L8 20H4v-4L17 3zM14 6l4 4"/>',
-    "verify": '<path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-3zM9 12l2 2 4-4"/>',
-    "commit": '<circle cx="12" cy="12" r="3.2"/><path d="M3 12h5.8M15.2 12H21"/>',
+    "cause": '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m20 20-4.8-4.8"/><path d="M10.5 7.5V11M10.5 13.6h.01"/>',
+    "shield": '<path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-3z"/><path d="M9 12l2 2 4-4"/>',
+    "talk": '<path d="M4 5h16v11H9l-5 4z"/><path d="M8 9.5h8M8 12.5h5"/>',
+    "steps": '<path d="M4 20h4v-4h4v-4h4V8h4"/><circle cx="20" cy="5" r="1.6"/>',
+    "report": '<path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4M10 12h5M10 15.5h5"/>',
+    "home": '<path d="M4 11.5 12 4l8 7.5"/><path d="M6 10v10h12V10"/><path d="M10 20v-5h4v5"/>',
+    "gift": '<rect x="3.5" y="8" width="17" height="4.5" rx="1"/><path d="M5.5 12.5V20h13v-7.5M12 8v12"/>'
+            '<path d="M12 8C10.5 4.5 7 4 7 6.2S10 8 12 8zM12 8c1.5-3.5 5-4 5-1.8S14 8 12 8z"/>',
+    "history": '<path d="M4 12a8 8 0 1 0 2.4-5.7"/><path d="M4 4v4h4"/><path d="M12 8v4.5l3 2"/>',
+    "bolt": '<path d="M13 3 5 14h6l-1 7 8-11h-6z"/>',
+    "plug": '<path d="M9 3v5M15 3v5"/><path d="M6 8h12v3a6 6 0 0 1-12 0z"/><path d="M12 17v4"/>',
 }
+
+SLIPS = [
+    ("forget", "It forgets the plan.", ["Long chats get trimmed,", "and the details go with them."]),
+    ("lowered", "It fakes the fix.", ["When a check fails, it quietly", "makes the check easier."]),
+    ("circles", "It goes in circles.", ["The same broken fix,", "again and again."]),
+    ("broken", "It breaks what worked.", ["A new change quietly", "undoes an old one."]),
+]
+CATCHES = [
+    ("plan", "The plan is written down.", ["After any break, your agent picks", "up exactly where it left off."]),
+    ("lock", "The checks are locked.", ["Making a check easier", "counts as a failure."]),
+    ("cause", "Three misses, then it stops.", ["It has to find the cause", "before it tries again."]),
+    ("shield", "Every step is re-checked.", ["Old features are tested again", "before anything is saved."]),
+]
 STEPS = [
-    ("plan", "Plan", "small tasks,", "each with a test"),
-    ("test", "Test first", "it must fail", "before the work"),
-    ("lock", "Lock", "the test can't", "be made easier"),
-    ("fix", "Fix", "3 misses in a row", "and it says STOP"),
-    ("verify", "Verify", "what passed before", "still passes"),
-    ("commit", "Commit", "one commit", "per task"),
+    ("talk", "Describe the job", ["One sentence to your", "agent is all it takes."]),
+    ("steps", "Your agent builds", ["Step by step, each one", "checked and saved."]),
+    ("report", "You get the result", ["Finished work and a", "short report to read."]),
+]
+# One evening's job, as the report tells it. Each of the four slips above happens once and is caught.
+STORY = [
+    ("start", "6:00 PM", "The plan is written", ["Four steps, each with a check", "that proves it works."]),
+    ("save", "6:40 PM", "Step 1 is saved", ["Items go into the cart.", "Checked, then saved."]),
+    ("slip", "7:15 PM", "A fake fix is caught", ["A check was made easier.", "It is put back as it was."]),
+    ("slip", "8:05 PM", "Three misses, then a stop", ["It stops guessing and tests", "its ideas to find the cause."]),
+    ("save", "8:30 PM", "Step 2 is saved", ["Prices and totals add up.", "Checked, then saved."]),
+    ("slip", "9:10 PM", "The chat is trimmed", ["It reads its notes and picks", "up exactly where it left off."]),
+    ("slip", "10:20 PM", "Step 3 breaks step 1", ["Caught before it is saved,", "then fixed."]),
+    ("done", "11:40 PM", "Done, with a report", ["4 steps saved, 4 slips caught", "and 1 question for you."]),
+]
+FACTS = [
+    ("talk", "No coding needed", ["You describe the job.", "Your agent does the rest."]),
+    ("home", "Stays on your computer", ["Your code is never", "sent anywhere."]),
+    ("gift", "Free and open source", ["No account, no sign-up.", "MIT license."]),
+    ("history", "Fine for messy projects", ["Old problems are noted first,", "so only new ones count."]),
+    ("bolt", "Barely slower", ["It re-checks only", "what changed."]),
+    ("plug", "Works with your agent", ["Claude Code, Codex, Gemini CLI,", "Antigravity, OpenCode and pi."]),
 ]
 
 
-def banner(t):
-    w, h, y = 1200, 440, 304
-    xs = [150 + 180 * i for i in range(len(STEPS))]
-    out = ['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %d %d" width="%d" height="%d" role="img" '
-           'aria-label="Sci-Harness: plan, test first, lock, fix, verify, commit, then the next task">' % (w, h, w, h),
-           '<defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="%s"/>'
-           '<stop offset="1" stop-color="%s"/></linearGradient>' % (t["top"], t["bottom"]),
-           '<linearGradient id="mark" gradientUnits="userSpaceOnUse" x1="350" y1="0" x2="480" y2="0">'
-           '<stop offset="0" stop-color="%s"/><stop offset="1" stop-color="%s"/></linearGradient>' % t["wordmark"],
-           '<marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" '
-           'orient="auto-start-reverse"><path d="M1 1l8 4-8 4" fill="none" stroke="%s" stroke-width="1.8" '
-           'stroke-linecap="round" stroke-linejoin="round"/></marker>' % t["line"],
-           '<marker id="loop" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" '
-           'orient="auto-start-reverse"><path d="M1 1l8 4-8 4" fill="none" stroke="%s" stroke-width="1.8" '
-           'stroke-linecap="round" stroke-linejoin="round"/></marker></defs>' % t["accent"],
-           '<rect x="1" y="1" width="%d" height="%d" rx="24" fill="url(#bg)" stroke="%s" stroke-width="2"/>'
-           % (w - 2, h - 2, t["border"]),
-           '<text x="600" y="78" text-anchor="middle" font-family="%s" font-size="15" font-weight="600" '
-           'letter-spacing="3" fill="%s">AN AGENT SKILL FOR LONG CODING TASKS</text>' % (SANS, t["accent"]),
-           '<text x="600" y="150" text-anchor="middle" font-family="%s" font-size="76" font-weight="800" '
-           'letter-spacing="-1.5" fill="%s"><tspan fill="url(#mark)">Sci</tspan>-Harness</text>' % (SANS, t["fg"]),
-           '<text x="600" y="196" text-anchor="middle" font-family="%s" font-size="21" fill="%s">It remembers the '
-           'plan, runs the tests and refuses shortcuts.</text>' % (SANS, t["muted"])]
-    # The way back from Commit to Test: every task repeats the loop.
-    out.append('<path d="M%d %d C%d 212 %d 212 %d %d" fill="none" stroke="%s" stroke-width="2" '
-               'stroke-dasharray="6 6" marker-end="url(#loop)"/>' % (xs[5], y - 33, xs[5], xs[1], xs[1], y - 34,
-                                                                     t["accent"]))
-    mid = (xs[1] + xs[5]) // 2
-    out.append('<rect x="%d" y="214" width="112" height="28" rx="14" fill="%s" stroke="%s" stroke-width="1.5"/>'
-               % (mid - 56, t["top"], t["accent"]))
-    out.append('<text x="%d" y="233" text-anchor="middle" font-family="%s" font-size="14" font-weight="600" '
-               'fill="%s">next task</text>' % (mid, SANS, t["accent"]))
-    for a, b in zip(xs, xs[1:]):
-        out.append('<path d="M%d %dH%d" stroke="%s" stroke-width="2" marker-end="url(#arrow)"/>'
-                   % (a + 38, y, b - 40, t["line"]))
-    for x, color, (icon, label, cap1, cap2) in zip(xs, t["steps"], STEPS):
-        out.append('<circle cx="%d" cy="%d" r="31" fill="%s" fill-opacity="%s" stroke="%s" stroke-width="2"/>'
-                   % (x, y, color, t["tint"], color))
-        out.append('<g transform="translate(%d %d) scale(1.25)" fill="none" stroke="%s" stroke-width="2" '
-                   'stroke-linecap="round" stroke-linejoin="round">%s</g>' % (x - 15, y - 15, color, ICONS[icon]))
-        out.append('<text x="%d" y="%d" text-anchor="middle" font-family="%s" font-size="20" font-weight="700" '
-                   'fill="%s">%s</text>' % (x, y + 64, SANS, t["fg"], label))
-        for i, cap in enumerate((cap1, cap2)):
-            out.append('<text x="%d" y="%d" text-anchor="middle" font-family="%s" font-size="16" fill="%s">%s'
-                       '</text>' % (x, y + 89 + 20 * i, SANS, t["muted"], escape(cap)))
-    out.append("</svg>")
-    return "\n".join(out) + "\n"
+def svg(w, h, label, body):
+    return ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %d %d" width="%d" height="%d" role="img" '
+            'aria-label="%s">\n%s\n</svg>\n' % (w, h, w, h, escape(label, {'"': "&quot;"}), "\n".join(body)))
 
 
-# Terminal colors (GitHub's dark palette), applied in order: a later rule paints over an earlier one.
-TERM = dict(bg="#0d1117", bar="#161b22", border="#30363d", fg="#e6edf3", muted="#8b949e", head="#d2a8ff",
-            accent="#79c0ff", red="#ff7b72", green="#3fb950", amber="#e3b341")
-RULES = [
-    (r"^=== .* ===$", "muted"),
-    (r"^ {2}(verify|scope |invariants|locked|last check|failing|deps):", "muted"),
-    (r"^ {2}N\d+ \[\w+\]", "muted"),
-    (r"^ {2}\| .*", "muted"),
-    (r"^(OBJECTIVE|PROGRESS|ACTIVE T\d+|NOTES \([^)]*\)|GOLDENS|BASELINE):", "head"),
-    (r"\[ \]", "muted"),
-    (r"\bFAIL\b|\bFAILED\b|^CHECK COUNTS AS FAIL\b.*|^GUARD: .*|^REGRESSION: .*|^NEW FAILURES.*", "red"),
-    (r"\bOK\b|\bPASS\b|\bok\b|^Restored .*|^H\d confirmed\.|^STOP cleared.*", "green"),
-    (r"\b[1-9]\d* ignored\b|^H\d refuted\.", "amber"),
-    (r"\[>\]|<- ACTIVE|[Ss]trikes? \d/3|^!!! .*", "amber"),
-    (r"^!!! STOP\b.*", "red"),
-    (r"^VERIFY FAIL$", "red"),
-    (r"^VERIFY PASS$", "green"),
-    (r"^NEXT:", "accent"),
-    (r"^\$ .*", "fg"),
-    (r"^\$", "muted"),
-    (r"^# .*|^\.\.\.$|^ {2}\.\.\.$", "muted"),
-    (r"^@@ .* @@$", "muted"),
-    (r"^\+.*", "green"),
-    (r"^-.*", "red"),
-]
-WRAP = 104  # columns; longer lines wrap like a terminal, with a small indent
+def text(x, y, s, size, fill, weight=400, anchor="start", spacing=None):
+    extra = ' letter-spacing="%s"' % spacing if spacing is not None else ""
+    return ('<text x="%s" y="%s" font-family="%s" font-size="%s" font-weight="%s" fill="%s" text-anchor="%s"%s>%s'
+            '</text>' % (x, y, SANS, size, weight, fill, anchor, extra, escape(s)))
 
 
-def paint(line):
-    colors = ["fg"] * len(line)
-    for pat, color in RULES:
-        for m in re.finditer(pat, line):
-            colors[m.start():m.end()] = [color] * (m.end() - m.start())
-    return colors
+def icon(name, x, y, size, color, width=1.8):
+    k = size / 24.0
+    return ('<g transform="translate(%s %s) scale(%.3f)" fill="none" stroke="%s" stroke-width="%s" '
+            'stroke-linecap="round" stroke-linejoin="round">%s</g>' % (x, y, k, color, width, ICONS[name]))
 
 
-def wrapped(line):
-    """[(text, colors)] visual lines of `line`, wrapped at a space before WRAP columns."""
-    colors, out, first = paint(line), [], True
-    while True:
-        room = WRAP - (0 if first else 4)
-        if len(line) <= room:
-            out.append((("" if first else "    ") + line, (["fg"] * (0 if first else 4)) + colors))
-            return out
-        cut = line.rfind(" ", 0, room)
-        cut = room if cut <= 0 else cut
-        out.append((("" if first else "    ") + line[:cut], (["fg"] * (0 if first else 4)) + colors[:cut]))
-        line, colors, first = line[cut:].lstrip(" "), colors[cut + len(line[cut:]) - len(line[cut:].lstrip(" ")):], False
+def badge(cx, cy, good, t):
+    fill = t["ok"] if good else t["bad"]
+    mark = "M-4 0.5l2.8 2.8L4 -3" if good else "M-3.2 -3.2l6.4 6.4M3.2 -3.2l-6.4 6.4"
+    return ('<g transform="translate(%s %s)"><circle r="12" fill="%s" stroke="%s" stroke-width="3"/>'
+            '<path d="%s" fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" '
+            'stroke-linejoin="round"/></g>' % (cx, cy, fill, t["card"], mark))
 
 
-def runs(text, colors):
-    i = 0
-    while i < len(text):
-        j = i
-        while j < len(text) and colors[j] == colors[i]:
-            j += 1
-        yield i, text[i:j], colors[i]
-        i = j
+def cards(items, good, t, label):
+    """A 2x2 grid of cards: an icon tile with a pass or fail badge, then a headline and two short lines.
+
+    The icon sits above the words so the grid stays narrow: on a phone the picture shrinks to the screen, and a
+    narrower picture keeps its words larger.
+    """
+    w, h, gap = 450, 246, 24
+    out = []
+    for i, (ico, head, lines) in enumerate(items):
+        x, y = (i % 2) * (w + gap), (i // 2) * (h + gap)
+        tile = t["ropesoft"] if good else t["grey"]
+        out.append('<rect x="%d" y="%d" width="%d" height="%d" rx="20" fill="%s" stroke="%s" stroke-width="1.5"/>'
+                   % (x + 1, y + 1, w - 2, h - 2, t["card"], t["line"]))
+        out.append('<rect x="%d" y="%d" width="64" height="64" rx="16" fill="%s"/>' % (x + 28, y + 28, tile))
+        out.append(icon(ico, x + 40, y + 40, 40, t["rope"] if good else t["muted"]))
+        out.append(badge(x + 90, y + 32, good, t))
+        out.append(text(x + 28, y + 136, head, 28, t["ink"], 700))
+        for k, line in enumerate(lines):
+            out.append(text(x + 28, y + 176 + 31 * k, line, 22, t["muted"]))
+    return svg(2 * w + gap, 2 * h + gap, label, out)
 
 
-def terminal(lines, title, label):
-    rows = [r for line in lines for r in wrapped(line)]
-    cw, lh, pad, top = 9.0, 22, 24, 62
-    w = int(max(880, pad * 2 + 40 + cw * max(len(t) for t, _ in rows)))  # 40: room for fonts wider than 0.6em
-    h = top + lh * len(rows) + 16
-    out = ['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %d %d" width="%d" height="%d" role="img" '
-           'aria-label="%s">' % (w, h, w, h, escape(label, {'"': "&quot;"})),
-           '<rect x="1" y="1" width="%d" height="%d" rx="12" fill="%s" stroke="%s" stroke-width="2"/>'
-           % (w - 2, h - 2, TERM["bg"], TERM["border"]),
-           '<path d="M2 38V13A11 11 0 0 1 13 2H%d A11 11 0 0 1 %d 13V38z" fill="%s"/>' % (w - 13, w - 2, TERM["bar"]),
-           '<path d="M2 38H%d" stroke="%s" stroke-width="1"/>' % (w - 2, TERM["border"])]
-    for i, c in enumerate(("#ff5f57", "#febc2e", "#28c840")):
-        out.append('<circle cx="%d" cy="20" r="6" fill="%s"/>' % (24 + 20 * i, c))
-    out.append('<text x="%d" y="25" text-anchor="middle" font-family="%s" font-size="13" fill="%s">%s</text>'
-               % (w // 2, SANS, TERM["muted"], escape(title)))
-    for n, (text, colors) in enumerate(rows):
-        y = top + lh * n + 14
-        parts = []
-        for col, piece, color in runs(text, colors):
-            bold = color in ("head", "accent") or (text.startswith("$ ") and col > 0)
-            parts.append('<tspan x="%.1f" fill="%s"%s>%s</tspan>' % (pad + cw * col, TERM[color],
-                                                                      ' font-weight="700"' if bold else "",
-                                                                      escape(piece)))
-        out.append('<text y="%d" font-family="%s" font-size="15" xml:space="preserve" style="%s">%s</text>'
-                   % (y, MONO, NO_LIGATURES, "".join(parts)))
-    out.append("</svg>")
-    return "\n".join(out) + "\n"
+def steps(t):
+    """Three steps in a row, joined by the rope, with an anchor at each step. As wide as the card grids."""
+    w, h, gap = 292, 236, 24
+    out = []
+    for i, (ico, head, lines) in enumerate(STEPS):
+        x = i * (w + gap)
+        out.append('<rect x="%d" y="1" width="%d" height="%d" rx="20" fill="%s" stroke="%s" stroke-width="1.5"/>'
+                   % (x + 1, w - 2, h - 2, t["card"], t["line"]))
+        out.append('<rect x="%d" y="28" width="64" height="64" rx="16" fill="%s"/>' % (x + 26, t["ropesoft"]))
+        out.append(icon(ico, x + 38, 40, 40, t["rope"]))
+        out.append(text(x + w - 28, 76, str(i + 1), 44, t["line"], 800, "end"))
+        out.append(text(x + 26, 138, head, 26, t["ink"], 700))
+        for k, line in enumerate(lines):
+            out.append(text(x + 26, 176 + 29 * k, line, 21, t["muted"]))
+        if i < len(STEPS) - 1:
+            ax = x + w + gap / 2.0
+            out.append('<path d="M%d 60H%d" stroke="%s" stroke-width="3" stroke-linecap="round"/>'
+                       % (x + w - 6, x + w + gap + 6, t["rope"]))
+            out.append('<circle cx="%s" cy="60" r="8" fill="%s" stroke="%s" stroke-width="3"/>'
+                       % (ax, t["sky"], t["rope"]))
+    return svg(3 * w + 2 * gap, h, "Three steps: describe the job in one sentence; your agent builds it step by "
+               "step, each one checked and saved; you get the finished work and a short report.", out)
 
 
-def scene(transcript, name):
-    """The lines of one `===== name =====` scene of the demo transcript."""
-    lines = transcript.splitlines()
-    start = lines.index("===== %s =====" % name)
-    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("===== ")), len(lines))
-    return lines[start + 1:end]
+def robot(x, y, t, ghost=False):
+    """The agent as a small robot head centered on (x, y)."""
+    stroke, fill = (t["faint"], "none") if ghost else (t["ink"], t["sky"])
+    dash = ' stroke-dasharray="3 4"' if ghost else ""
+    eyes = "" if ghost else ('<circle cx="%d" cy="%d" r="3" fill="%s"/><circle cx="%d" cy="%d" r="3" fill="%s"/>'
+                             % (x - 7, y + 1, t["ink"], x + 7, y + 1, t["ink"]))
+    return ('<rect x="%d" y="%d" width="40" height="32" rx="10" fill="%s" stroke="%s" stroke-width="2.6"%s/>'
+            '<path d="M%d %dv-7" stroke="%s" stroke-width="2.6" stroke-linecap="round"%s/>%s'
+            % (x - 20, y - 15, fill, stroke, dash, x, y - 15, stroke, dash, eyes))
 
 
-def piece(lines, first, drop=None):
-    """The block that starts with the line `first` (up to the next blank line), without the lines that match
-    `drop`; a cut inside the block shows as `...`."""
-    start = next(i for i, ln in enumerate(lines) if ln == first or ln.startswith(first))
-    end = next((i for i in range(start, len(lines)) if not lines[i]), len(lines))
-    out, cut = [], False
-    for ln in lines[start:end]:
-        if drop and re.search(drop, ln):
-            cut = True
-            continue
-        if cut and out:
-            out.append("  ..." if ln.startswith("  ") else "...")
-        cut = False
-        out.append(ln)
-    return out
+def hero(t):
+    """The name, the promise, and the picture: a rope up a mountain, every anchor a checked and saved step."""
+    W, H = 1200, 470
+    out = ['<defs><clipPath id="frame"><rect x="1" y="1" width="%d" height="%d" rx="28"/></clipPath></defs>'
+           % (W - 2, H - 2),
+           '<rect x="1" y="1" width="%d" height="%d" rx="28" fill="%s" stroke="%s" stroke-width="2"/>'
+           % (W - 2, H - 2, t["panel"], t["line"]),
+           '<g clip-path="url(#frame)">']
+    # The mountain: three layers of granite.
+    out.append('<path d="M560 470 L700 330 L760 365 L860 230 L905 262 L985 120 L1040 175 L1085 150 L1200 260 '
+               'L1200 470 Z" fill="%s"/>' % t["rock"])
+    out.append('<path d="M640 470 L780 360 L830 380 L935 250 L985 120 L1010 200 L1090 300 L1200 340 L1200 470 Z" '
+               'fill="%s"/>' % t["rock2"])
+    out.append('<path d="M760 470 L880 400 L960 420 L1060 350 L1200 410 L1200 470 Z" fill="%s"/>' % t["rock3"])
+    out.append("</g>")
+    # The route: the rope runs through the anchors to the summit.
+    anchors = [(700, 440), (790, 385), (865, 330), (925, 268), (955, 205), (985, 150)]
+    d = "M%d %d" % anchors[0]
+    for (x0, y0), (x1, y1) in zip(anchors, anchors[1:]):
+        d += " Q%d %d %d %d" % ((x0 + x1) / 2.0 + (18 if y1 % 2 else -18), (y0 + y1) / 2.0, x1, y1)
+    done = 4  # anchors passed so far
+    out.append('<path d="%s" fill="none" stroke="%s" stroke-width="4" stroke-linecap="round" '
+               'stroke-dasharray="1 0"/>' % (d, t["rope"]))
+    # The flag at the summit.
+    sx, sy = anchors[-1]
+    out.append('<path d="M%d %dV%d" stroke="%s" stroke-width="3" stroke-linecap="round"/>' % (sx, sy - 14, sy - 76,
+                                                                                            t["ink"]))
+    out.append('<path d="M%d %d l46 14 -46 14z" fill="%s"/>' % (sx + 1, sy - 76, t["ok"]))
+    out.append(text(sx + 58, sy - 52, "Done", 20, t["ink"], 700))
+    for i, (x, y) in enumerate(anchors[:-1]):
+        if i < done:
+            out.append('<circle cx="%d" cy="%d" r="14" fill="%s" stroke="%s" stroke-width="3.5"/>' % (x, y, t["ok"],
+                                                                                                    t["panel"]))
+            out.append('<path d="M%d %d l4 4 7-8" fill="none" stroke="#ffffff" stroke-width="2.6" '
+                       'stroke-linecap="round" stroke-linejoin="round"/>' % (x - 5.5, y + 0.5))
+        else:
+            out.append('<circle cx="%d" cy="%d" r="13" fill="%s" stroke="%s" stroke-width="4"/>' % (x, y, t["sky"],
+                                                                                                  t["rope"]))
+    # The climber, the agent: it slipped from just under the next anchor and hangs from the last one it passed.
+    ax, ay = anchors[3]
+    gx, gy = anchors[4][0] + 40, anchors[4][1] + 6  # where it slipped from
+    cx, cy = ax + 28, ay + 60  # where the rope caught it
+    out.append(robot(gx, gy, t, ghost=True))
+    out.append('<path d="M%d %d Q%d %d %d %d" fill="none" stroke="%s" stroke-width="2.2" stroke-dasharray="3 6" '
+               'stroke-linecap="round"/>' % (gx + 22, gy + 4, gx + 34, (gy + cy) / 2, cx + 24, cy - 6, t["faint"]))
+    out.append('<path d="M%d %d L%d %d" stroke="%s" stroke-width="3" stroke-linecap="round"/>'
+               % (ax, ay, cx, cy - 22, t["rope"]))
+    out.append(robot(cx, cy, t))
+    # Two notes on the picture.
+    out.append(text(cx + 36, cy - 2, "A slip is caught", 18, t["ink"], 600))
+    out.append(text(cx + 36, cy + 22, "at the last saved step.", 18, t["muted"]))
+    lx, ly = anchors[1]
+    out.append(text(lx + 30, ly + 26, "Every step checked", 18, t["ink"], 600))
+    out.append(text(lx + 30, ly + 50, "and saved.", 18, t["muted"]))
+    # The words.
+    out.append(text(72, 132, "FOR CODING AGENTS", 15, t["rope"], 700, spacing=3))
+    out.append(text(68, 214, "Sci-Harness", 78, t["ink"], 800, spacing=-2))
+    out.append(text(72, 282, "Give your agent a big coding job.", 30, t["ink"], 500))
+    out.append(text(72, 324, "Get it done right.", 30, t["ink"], 500))
+    out.append('<path d="M74 350 H330" stroke="%s" stroke-width="4" stroke-linecap="round"/>' % t["rope"])
+    out.append(text(72, 400, "Free · works offline · Claude Code, Codex, Gemini and more", 18, t["muted"]))
+    return svg(W, H, "Sci-Harness, for coding agents. Give your agent a big coding job. Get it done right. "
+               "A rope runs up a mountain through anchors; every step is checked and saved, and a slip is caught at "
+               "the last saved step.", out)
 
 
-NOISE = r"^  \| |^  --- output|^  \(full log|^\[sci\] "
-# The README's terminal pictures: file, scene, the blocks to show (first line, lines to drop), alt text.
-PICTURES = [
-    ("caught.svg", "T1: the agent hides the failing test",
-     [("# the agent edits", None), ("$ .sci/sci check", NOISE + "|^GUARD FIX"),
-      ("$ .sci/sci restore", r"^Your previous|^Next:|^\[sci\] ")],
-     "Terminal: the agent adds #[ignore] to a failing Rust test; the tests pass, but sci's check counts as FAIL "
-     "with LOCKED TESTS CHANGED: src/stats.rs: skip/xfail added: #[ignore = \"flaky\"]; restore --paths puts "
-     "back only the tests and leaves the code unchanged."),
-    ("stop.svg", "T1: fix 3",
-     [("$ .sci/sci check", r"^  \| (?!left|right)|^  --- output|^  \(full log|^  summary:|^\[sci\] ")],
-     "Terminal: the third failed fix; sci prints STOP: 3 failed fix attempts in a row, do not edit code now, "
-     "and lists the steps: write hypotheses, test them with an experiment, refute or confirm."),
-    ("evidence.svg", "T1: STOP, guesses and an experiment",
-     [("$ .sci/sci run", r"^Cite it|^STOP still"), ("$ .sci/sci hyp refute", r"^\[sci\] "),
-      ("$ .sci/sci hyp confirm", r"^\[sci\] ")],
-     "Terminal: an experiment through sci shows that rounding the rank down picks the wrong sample; H1 is "
-     "refuted, the STOP clears, and H2 (the rank must be rounded up) is confirmed."),
-    ("resume.svg", "the agent's context is compacted", [("$ .sci/sci resume", None)],
-     "Terminal: .sci/sci resume prints the objective, both tasks with T1 active, its test command, files, the "
-     "locked tests, the last check (FAIL, strikes 1/3), the failing test, a note, the baseline and NEXT."),
-    ("regression.svg", "T2",
-     [("$ .sci/sci verify", NOISE + r"|^  summary:"), ("# the agent edits src/stats.rs: rank() rounds up", None),
-      ("$ .sci/sci check", r"^  \| |^  summary:|^\[sci\] ")],
-     "Terminal: verify for T2 fails: REGRESSION, your change broke T1's tests "
-     "(stats::tests::p99_of_10_samples_is_the_slowest); after the fix, check reruns only that test and it passes."),
-]
+def marker(kind, x, y, t):
+    """A stop on the timeline: a ring for the start, a check for a saved step, a flag-green check at the end, and
+    an exclamation mark for a slip that was caught."""
+    if kind == "start":
+        return '<circle cx="%d" cy="%d" r="15" fill="%s" stroke="%s" stroke-width="5"/>' % (x, y, t["panel"],
+                                                                                          t["rope"])
+    fill = {"save": t["ok"], "done": t["ok"], "slip": t["rope"]}[kind]
+    ring = '<circle cx="%d" cy="%d" r="19" fill="%s" stroke="%s" stroke-width="5"/>' % (x, y, fill, t["panel"])
+    if kind == "slip":
+        return ring + ('<path d="M%d %dv9" stroke="#ffffff" stroke-width="3.4" stroke-linecap="round"/>'
+                       '<circle cx="%d" cy="%d" r="2.1" fill="#ffffff"/>' % (x, y - 8, x, y + 7))
+    return ring + ('<path d="M%d %d l5 5 9-10" fill="none" stroke="#ffffff" stroke-width="3.2" '
+                   'stroke-linecap="round" stroke-linejoin="round"/>' % (x - 7, y + 0.5))
 
 
-def picture(transcript, scene_name, blocks):
-    lines, out = scene(transcript, scene_name), []
-    for first, drop in blocks:
-        # the second `$ .sci/sci check` of a scene follows the edit named before it
-        start = 0
-        if out and first.startswith("$ "):
-            prev = out[-1] if out[-1] else out[-2]
-            idx = [i for i, ln in enumerate(lines) if ln == prev]
-            start = idx[-1] if idx else 0
-        if out:
-            out.append("")
-        out += piece(lines[start:], first, drop)
-    return out
+def story(t):
+    """One evening's job as two columns of a timeline. The rope runs down the first column and on into the second."""
+    W, H, pad, col = 1040, 668, 40, 480
+    gapy, top = 152, 92
+    out = ['<defs><clipPath id="panel"><rect x="1" y="1" width="%d" height="%d" rx="28"/></clipPath></defs>'
+           % (W - 2, H - 2),
+           '<rect x="1" y="1" width="%d" height="%d" rx="28" fill="%s" stroke="%s" stroke-width="2"/>'
+           % (W - 2, H - 2, t["panel"], t["line"]),
+           '<g clip-path="url(#panel)">']
+    for c in range(2):
+        rx = pad + c * col + 24
+        y0 = top if c == 0 else 0
+        y1 = H if c == 0 else top + 3 * gapy
+        out.append('<path d="M%d %dV%d" stroke="%s" stroke-width="4" stroke-linecap="round"/>'
+                   % (rx, y0, y1, t["rope"]))
+    out.append("</g>")
+    for i, (kind, when, head, lines) in enumerate(STORY):
+        c, r = divmod(i, 4)
+        rx, y = pad + c * col + 24, top + r * gapy
+        tx = rx + 48
+        out.append(marker(kind, rx, y, t))
+        out.append(text(tx, y - 30, when, 16, t["rope"] if kind == "slip" else t["faint"], 700, spacing=1.5))
+        out.append(text(tx, y + 9, head, 28, t["ink"], 700))
+        for k, line in enumerate(lines):
+            out.append(text(tx, y + 44 + 30 * k, line, 22, t["muted"]))
+    label = "One evening's job, start to finish. " + " ".join(
+        "%s: %s. %s" % (when, head, " ".join(lines)) for _, when, head, lines in STORY)
+    return svg(W, H, label, out)
 
 
-# Values that differ in every run of the demo: durations, thread ids, timestamps and commit hashes.
-VOLATILE = [(r"\b\d+(\.\d+)?s\b", "<secs>"), (r"\(\d{4,}\)", "(<id>)"), (r"-\d{9,}\.patch", "-<time>.patch"),
-            (r"\b[0-9a-f]{7,10}\b", "<hash>")]
+def tiles(items, t, label):
+    """A 2x3 grid of tiles: an icon tile, a headline and two short lines."""
+    w, h, gap = 450, 150, 24
+    out = []
+    for i, (ico, head, lines) in enumerate(items):
+        x, y = (i % 2) * (w + gap), (i // 2) * (h + gap)
+        out.append('<rect x="%d" y="%d" width="%d" height="%d" rx="20" fill="%s" stroke="%s" stroke-width="1.5"/>'
+                   % (x + 1, y + 1, w - 2, h - 2, t["card"], t["line"]))
+        out.append('<rect x="%d" y="%d" width="56" height="56" rx="14" fill="%s"/>' % (x + 26, y + 30, t["ropesoft"]))
+        out.append(icon(ico, x + 37, y + 41, 34, t["rope"]))
+        out.append(text(x + 104, y + 58, head, 25, t["ink"], 700))
+        for k, line in enumerate(lines):
+            out.append(text(x + 104, y + 92 + 28 * k, line, 20, t["muted"]))
+    return svg(2 * w + gap, 3 * h + 2 * gap, label, out)
 
 
-def stable(line):
-    for pat, rep in VOLATILE:
-        line = re.sub(pat, rep, line)
-    return line
-
-
-def unquoted(readme, transcript):
-    """Lines of the README's console blocks that the demo did not print (`...` marks a cut)."""
-    printed = set(stable(ln) for ln in transcript.splitlines())
-    missing, inside = [], False
-    for line in readme.splitlines():
-        if line.startswith("```"):
-            inside = line == "```console"
-        elif inside and line.strip() not in ("", "...") and stable(line) not in printed:
-            missing.append(line)
-    return missing
-
-
-def main(argv):
-    for name, theme in THEMES.items():
-        (HERE / ("banner-%s.svg" % name)).write_text(banner(theme), encoding="utf-8")
-    if len(argv) < 2:
-        return 0
-    transcript = Path(argv[1]).read_text(encoding="utf-8")
-    (HERE / "session.txt").write_text(transcript.lstrip("\n"), encoding="utf-8")
-    for name, scene_name, blocks, label in PICTURES:
-        lines = picture(transcript, scene_name, blocks)
-        (HERE / name).write_text(terminal(lines, "~/latency", label), encoding="utf-8")
-    missing = unquoted((HERE.parent.parent / "README.md").read_text(encoding="utf-8"), transcript)
-    for line in missing:
-        print("README quotes a line the demo did not print: " + line)
-    return 1 if missing else 0
+def draw(out_dir):
+    for name, t in THEMES.items():
+        files = {
+            "hero": hero(t),
+            "slips": cards(SLIPS, False, t, "Four ways agents slip on big jobs: it forgets the plan; it fakes the fix "
+                           "by making a failing check easier; it goes in circles with the same broken fix; it breaks "
+                           "what worked."),
+            "catches": cards(CATCHES, True, t, "How Sci-Harness catches each slip: the plan is written down; the "
+                             "checks are locked; after three misses it stops to find the cause; every step is "
+                             "re-checked before anything is saved."),
+            "story": story(t),
+            "steps": steps(t),
+            "facts": tiles(FACTS, t, "Good to know. " + " ".join(
+                "%s: %s" % (head, " ".join(lines)) for _, head, lines in FACTS)),
+        }
+        for base, content in files.items():
+            (out_dir / ("%s-%s.svg" % (base, name))).write_text(content, encoding="utf-8")
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    draw(Path(__file__).resolve().parent)

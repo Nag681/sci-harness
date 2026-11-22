@@ -96,7 +96,7 @@ class TestInstall(unittest.TestCase):
         self.assertTrue((installed / "SKILL.md").is_file())
         self.assertTrue((installed / "scripts" / "sci.py").is_file())
         self.assertTrue((installed / MARK).is_file())
-        for repo_only in ("tests", "install.sh", "install.ps1", ".github", ".gitattributes"):
+        for repo_only in ("tests", "docs", "install.sh", "install.ps1", ".github", ".gitattributes"):
             self.assertFalse((installed / repo_only).exists(), repo_only)
         for rel in (".claude/skills/" + NAME, ".agents/skills/" + NAME):
             h.assert_provides(self, rel)

@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 924 516" width="924" height="516" role="img" aria-label="Four ways agents slip on big jobs: it forgets the plan; it fakes the fix by making a failing check easier; it goes in circles with the same broken fix; it breaks what worked.">
+<rect x="1" y="1" width="448" height="244" rx="20" fill="#f6f8fa" stroke="#d8dee4" stroke-width="1.5"/>
+<rect x="28" y="28" width="64" height="64" rx="16" fill="#eaeef2"/>
+<g transform="translate(40 40) scale(1.667)" fill="none" stroke="#57626e" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11.5a8 8 0 0 1-11.6 7.1L4 19.8l1.1-4.2A8 8 0 1 1 20 11.5z"/><path d="M9.8 9.2a2.3 2.3 0 1 1 3.3 2.1c-.7.4-1.1.9-1.1 1.7M12 15.6h.01"/></g>
+<g transform="translate(90 32)"><circle r="12" fill="#b42318" stroke="#f6f8fa" stroke-width="3"/><path d="M-3.2 -3.2l6.4 6.4M3.2 -3.2l-6.4 6.4" fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></g>
+<text x="28" y="136" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="28" font-weight="700" fill="#17212b" text-anchor="start">It forgets the plan.</text>
+<text x="28" y="176" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="22" font-weight="400" fill="#57626e" text-anchor="start">Long chats get trimmed,</text>
+<text x="28" y="207" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="22" font-weight="400" fill="#57626e" text-anchor="start">and the details go with them.</text>
+<rect x="475" y="1" width="448" height="244" rx="20" fill="#f6f8fa" stroke="#d8dee4" stroke-width="1.5"/>
+<rect x="502" y="28" width="64" height="64" rx="16" fill="#eaeef2"/>
+<g transform="translate(514 40) scale(1.667)" fill="none" stroke="#57626e" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3v18M19 3v18M5 16h14"/><path d="M12 5v6.5M9.5 9 12 11.5 14.5 9"/></g>
+<g transform="translate(564 32)"><circle r="12" fill="#b42318" stroke="#f6f8fa" stroke-width="3"/><path d="M-3.2 -3.2l6.4 6.4M3.2 -3.2l-6.4 6.4" fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></g>
+<text x="502" y="136" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="28" font-weight="700" fill="#17212b" text-anchor="start">It fakes the fix.</text>
+<text x="502" y="176" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="22" font-weight="400" fill="#57626e" text-anchor="start">When a check fails, it quietly</text>
+<text x="502" y="207" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="22" font-weight="400" fill="#57626e" text-anchor="start">makes the check easier.</text>
+<rect x="1" y="271" width="448" height="244" rx="20" fill="#f6f8fa" stroke="#d8dee4" stroke-width="1.5"/>
+<rect x="28" y="298" width="64" height="64" rx="16" fill="#eaeef2"/>
+<g transform="translate(40 310) scale(1.667)" fill="none" stroke="#57626e" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19.5 12a7.5 7.5 0 0 1-13.2 4.9M4.5 12a7.5 7.5 0 0 1 13.2-4.9"/><path d="M18 3.5v4h-4M6 20.5v-4h4"/></g>
+<g transform="translate(90 302)"><circle r="12" fill="#b42318" stroke="#f6f8fa" stroke-width="3"/><path d="M-3.2 -3.2l6.4 6.4M3.2 -3.2l-6.4 6.4" fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></g>
+<text x="28" y="406" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="28" font-weight="700" fill="#17212b" text-anchor="start">It goes in circles.</text>
+<text x="28" y="446" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="22" font-weight="400" fill="#57626e" text-anchor="start">The same broken fix,</text>
+<text x="28" y="477" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="22" font-weight="400" fill="#57626e" text-anchor="start">again and again.</text>
+<rect x="475" y="271" width="448" height="244" rx="20" fill="#f6f8fa" stroke="#d8dee4" stroke-width="1.5"/>
+<rect x="502" y="298" width="64" height="64" rx="16" fill="#eaeef2"/>
+<g transform="translate(514 310) scale(1.667)" fill="none" stroke="#57626e" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H6.5A2.5 2.5 0 0 0 4 6.5v11A2.5 2.5 0 0 0 6.5 20H10M14 4h3.5A2.5 2.5 0 0 1 20 6.5v11a2.5 2.5 0 0 1-2.5 2.5H13"/><path d="M12.5 4 10.5 9l3 3-2.5 4 1.5 4"/></g>
+<g transform="translate(564 302)"><circle r="12" fill="#b42318" stroke="#f6f8fa" stroke-width="3"/><path d="M-3.2 -3.2l6.4 6.4M3.2 -3.2l-6.4 6.4" fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></g>
+<text x="502" y="406" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="28" font-weight="700" fill="#17212b" text-anchor="start">It breaks what worked.</text>
+<text x="502" y="446" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="22" font-weight="400" fill="#57626e" text-anchor="start">A new change quietly</text>
+<text x="502" y="477" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="22" font-weight="400" fill="#57626e" text-anchor="start">undoes an old one.</text>
+</svg>
