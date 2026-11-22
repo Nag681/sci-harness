@@ -8,16 +8,6 @@ long jobs.
 
 **[Get started](#get-started)** · [Good to know](#good-to-know) · [For developers](docs/how-it-works.md)
 
-## Same job, two endings
-
-You ask your agent to add text reminders to your dental clinic's booking site, then go home.
-
-| | Without Sci&#8209;Harness | With Sci&#8209;Harness |
-| --- | --- | --- |
-| **That night** | “Done. All checks pass.” | “Done. 5 steps, each checked and saved.” |
-| **What really happened** | It switched off the failing reminder check. Its new code also broke the booking form. | Switching a check off counts as a failure, so it found the real bug: reminders were a day early. The broken booking form was caught before saving. |
-| **Next morning** | ❌ Patients turn up a day early, and nobody can book. | ✅ Reminders go out for the right day, and booking works. |
-
 ## Big jobs are where agents slip
 
 Agents slip on long jobs in four ways. Sci-Harness works like a climber's harness: every finished
@@ -46,9 +36,8 @@ Windows:
 irm https://raw.githubusercontent.com/Nag681/sci-harness/main/install.ps1 | iex
 ```
 
-**2. Give your agent a big job.** Restart your agent, open your project and type:
-
-> **`/sci add text reminders to my booking site`**
+**2. Give your agent a big job.** Restart your agent, open your project and type **`/sci`**, then the job in one
+sentence.
 
 **3. Read the report.** When the job is done, your agent tells you what changed and what needs you.
 
