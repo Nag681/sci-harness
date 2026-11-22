@@ -14,7 +14,7 @@ compatibility: >-
   OpenCode, pi, Cursor).
 allowed-tools: Bash(.sci/sci:*) Read Grep Glob
 metadata:
-  version: "3.4.0"
+  version: "3.4.1"
 ---
 
 # Long coding tasks that stay on track
@@ -137,7 +137,7 @@ Run every command from the repository root.
 | --- | --- |
 | `STOP` | Do not edit code. `.sci/sci hyp add "<specific cause>"` (at least 2). Test each with a small `.sci/sci run` experiment. `.sci/sci hyp refute H1 "<evidence>"` or `.sci/sci hyp confirm H2 "<evidence>"`. Then fix only the confirmed cause. |
 | `ESCALATE` | `.sci/sci restore --to start` (a fresh start: strikes reset) and try a different approach (write it down with `.sci/sci note --kind decision`), or block the task and ask the human. After two fresh starts it says to ask the human: do that. |
-| `LOCKED FILE CHANGED`, `LOCKED TESTS CHANGED`, `EXISTING TEST WEAKENED`, `PROTECTED TEST(S) CHANGED` | `.sci/sci restore --paths <file>` (in a Rust source file it puts back only the tests). If the test is wrong or must follow an intended change of this task: `.sci/sci unlock <file> --reason "..."`. |
+| `LOCKED FILE CHANGED`, `LOCKED TESTS CHANGED`, `EXISTING TEST WEAKENED`, `PROTECTED TEST(S) CHANGED` | `.sci/sci restore --paths <file>` (in a Rust source file it puts back only the tests, or the whole file if a test was added or removed; it says so). If the test is wrong or must follow an intended change of this task: `.sci/sci unlock <file> --reason "..."`. |
 | `REGRESSION: your change broke T2` | Fix your code, then `.sci/sci check` (it reruns T2's check). Change T2's tests only if they must follow an intended change of this task (`unlock`, as above). |
 | `FAIL golden <name>` | Output changed. Unintended: fix the code. Intended (a bug fix, a better method): `.sci/sci golden update <name> --reason "..."`. |
 | `NEW FAILURES (not in baseline)` | Your change broke other tests. Fix the code, then `.sci/sci check` (it reruns them). |

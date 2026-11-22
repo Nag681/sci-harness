@@ -115,14 +115,15 @@ def _checkout_files(s):
     return len([a for a in args if not a.startswith("-") and a != '""' and not re.match(r"\d*[<>&]", a)]) >= 2
 
 
-SHELL_ARG_RE = re.compile(r"(?:^|\s)(?:-\w*c|-Command|/c|eval)\s*$", re.I)  # sh -c "..", cmd /c "..", eval ".."
+# sh -c "..", bash -c -- "..", sh -c $'..', cmd /c "..", eval ".."
+SHELL_ARG_RE = re.compile(r"(?:^|\s)(?:-\w*c|-Command|/c|eval)(?:\s+--)?\s*\$?$", re.I)
 SCI_PATH_RE = re.compile(r"(?:^|/)\.sci(?:/|$)")
 SCRATCH_RE = re.compile(r"(?:^|/)\.sci/scratch(?:/|$)")
 
 
 def _deletes_sci(s):
     """A delete command whose target lies in .sci/, except the agent's own scratch files in .sci/scratch/."""
-    if not re.search(r"(^|\s)(rm|rmdir|rd|del|erase|ri|remove-item)\s", s, re.I):
+    if not re.search(r"(^|\s)(?:\S*[/\\])?(rm|rmdir|rd|del|erase|ri|remove-item)\s", s, re.I):  # also /bin/rm, \\rm
         return False
     for tok in s.split():
         t = tok.strip("'\"").replace("\\", "/")

@@ -193,7 +193,7 @@ FAIL check T1: exit 1 in 0.1s | log .sci/runs/0008-check-T1.log
   ...
   | AssertionError: 114.99 != 115.0 within 2 places (0.010000000000005116 difference)
   ...
-Attempt saved: .sci/attempts/T1-strike3-1795324366.patch
+Attempt saved: .sci/attempts/T1-strike3-1795339174.patch
 !!! STOP: 3 failed fix attempts in a row. Do NOT edit code now.
 !!! 1) .sci/sci hyp add "<specific, testable cause>"  (at least 2 hypotheses)
 !!! 2) test each with a tiny experiment, not a code fix: .sci/sci run "python3 .sci/scratch/probe.py"
@@ -247,7 +247,7 @@ VERIFY FAIL
 
 $ .sci/sci golden update shares --reason "the old shares lost a cent (3 x 33.33 = 99.99); now they add up to 100.00"
 Golden shares re-recorded: 3 numbers, rtol=1e-12 atol=0 (reproducible across 2 runs).
-[sci] T1 "Add a tip option to split()" | check FAIL 0s ago | strikes 0/3 | NEXT: Golden shares is up to date. Run `.sci/sci verify` again.
+[sci] T1 "Add a tip option to split()" | check FAIL 1s ago | strikes 0/3 | NEXT: Golden shares is up to date. Run `.sci/sci verify` again.
 
 $ .sci/sci verify
 PASS task T1: reused (passed on identical code 0s ago)
@@ -272,7 +272,7 @@ strike 1. One command brings everything back, and the last line says what to do 
 
 ```console
 $ .sci/sci resume
-=== .sci/sci resume | session 2 | sci/tip @ 287fd5f4 | 2 changed/untracked files | sci 3.4.0 ===
+=== .sci/sci resume | session 2 | sci/tip @ 71513028 | 2 changed/untracked files | sci 3.4.1 ===
 OBJECTIVE: Add a tip option to the bill splitter
 PROGRESS: 0/2 done, 0 blocked, 1 todo
   [>] T1 Add a tip option to split()  <- ACTIVE
@@ -302,11 +302,11 @@ test:
 ```console
 $ .sci/sci verify
 note: the regression suite runs the tests of T1, so their checks do not run separately.
-PASS task T2: reused (passed on identical code 0s ago)
+PASS task T2: reused (passed on identical code 1s ago)
 PASS golden shares: 3 numbers within rtol=1e-12 atol=0
 FAIL regression suite: exit 1 in 0.1s | log .sci/runs/0019-regress-T2.log
   $ python3 -m unittest discover -s . -q
-  summary: Ran 4 tests in 0.001s | FAILED (failures=1)
+  summary: Ran 4 tests in 0.000s | FAILED (failures=1)
   failing (1): test_tip.TestTip.test_shares_add_up_to_bill_plus_tip
   ...
   | AssertionError: 114.99 != 115.0 within 2 places (0.010000000000005116 difference)
@@ -340,9 +340,9 @@ One commit per task, and a report for you:
 
 ```console
 $ git log --oneline
-2ddaef2 feat: show the tip on the receipt [T2]
-e841b23 feat: tip option for split() [T1]
-287fd5f bill splitter
+37587fa feat: show the tip on the receipt [T2]
+2a1339c feat: tip option for split() [T1]
+7151302 bill splitter
 
 $ .sci/sci report
 # .sci/sci report
@@ -350,8 +350,8 @@ $ .sci/sci report
 Objective: Add a tip option to the bill splitter
 Tasks: 2/2 done, 0 blocked, 0 todo
 
-- T1 [done] Add a tip option to split() (commit e841b23b99)
-- T2 [done] Show the tip on the receipt (commit 2ddaef2dd9)
+- T1 [done] Add a tip option to split() (commit 2a1339cfed)
+- T2 [done] Show the tip on the receipt (commit 37587fa0e0)
 
 Last verify: PASS 0s ago
 Goldens: shares OK
@@ -524,7 +524,7 @@ the settings inside `.git/`. If `.sci/` gets deleted, running `init` again bring
 | pi | ✅ | |
 | any other skills folder | `--target <dir>` | |
 
-¹ Codex runs hooks only with `[features] hooks = true` in its `config.toml`.
+¹ Current Codex runs hooks unless its `config.toml` has `[features] hooks = false`; older versions need `hooks = true` there.
 
 ## FAQ
 

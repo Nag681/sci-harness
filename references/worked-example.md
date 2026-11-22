@@ -2,7 +2,7 @@
 
 A real session, recorded with sci 3.0.0. Outputs are real but trimmed: most repeated `[sci] ... NEXT:`
 footer lines are left out, and `...` marks cuts in long test output. The `verify` outputs (sections 6 to 8)
-are shown as sci 3.4.0 prints them: a step that already passed on identical code is reused, an earlier
+are shown as sci 3.4.1 prints them: a step that already passed on identical code is reused, an earlier
 task's test runs once, inside the regression suite, and the last task's verify is the final one. The repository is a toy:
 `orbit/integrators.py` has `euler()` and `run()` for the harmonic oscillator x'' = -x. Copy the
 pattern, not the numbers.

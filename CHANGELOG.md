@@ -5,6 +5,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.1] - 2026-11-22
+
+Fixes for a second review by Gemini, this time of 3.4.0. The most serious finding was a regression in 3.4.0
+itself: ignoring the files a check writes could stop sci from guarding the tests. Every finding below was
+reproduced before it was fixed and has a test.
+
+### Fixed
+- 3.4.0 ignored the files a check writes, and ignored a whole folder when the check wrote five or more files in
+  it, even a test folder such as `tests/`. Locked and protected tests in that folder were then no longer
+  guarded, so a weakened test could pass `verify` and `done`. Outputs are now ignored one file at a time. A folder
+  is ignored as a whole only when it is outside the task scope and holds no test, tracked or guarded file. A
+  guarded file that the check itself rewrites is output, not a test: it stops being guarded and is listed for
+  human review.
+- After a verify that ignored new outputs, `done` saw different files from the ones verified and asked for
+  another verify. `check` and `verify` now record the files after ignoring outputs.
+- A file that the task scope names (a report the task must produce) was ignored if an earlier check had written
+  it, so `done` never committed it. Naming it in the scope (`task start`, `task scope`, `task amend --scope`)
+  takes it back. `done` also commits untracked files the scope names that existed before the task started.
+- Rust: an attribute placed above a test attribute, such as `#[cfg(feature = "x")]` above `#[cfg(test)]` or
+  `#[ignore]` above `#[test]`, lay outside the locked region, so it could turn locked tests off without being
+  noticed. A region now starts at the item's first attribute. Regions recorded by 3.4.0 are upgraded when sci
+  loads the state, and the upgrade flags nothing.
+- Rust: the lexer misread an escaped quote character (`'\''`) and C strings (`c"..."`, `cr#"..."#`), so a brace
+  after one could end a test region in the wrong place.
+- `restore --paths` on a Rust file whose tests no longer match the locked ones (a test added or removed) put
+  back the whole file, code included, and reported only "Restored 1 file". It now warns that the code was
+  restored too and names the saved patch that holds the previous version.
+- The check that confirms a `restore --to start` counted as a failed fix attempt and cost a strike. The count
+  of fresh starts also carried over when a blocked task was started again, so NEXT asked for the human too early.
+- jest adds a time to slow files (`FAIL src/cart.test.ts (5.1 s)`), and sci did not read those failures.
+- `cargo test --lib` in a workspace (`--workspace`, `--all`, or a virtual manifest without `-p`) runs one target
+  per crate and stops at the first failing crate. sci treated it as a single target that never stops early.
+- `unlock` without paths skipped tests locked inside Rust source files, and `unlock` with no active task did not
+  update protected tests in source files. A test that a task locked, then unlocked to change, was no longer
+  guarded after `done`; it now is.
+- `done` counted as the final verify even when a commit hook changed files after the commit.
+- `lock` found no file for a `cargo test tests::name` filter (the crate root's own tests). It now locks
+  `src/lib.rs` or `src/main.rs`.
+- Narrowing `test_globs` stopped treating some files as tests without saying so. Those files are now listed for
+  human review.
+- The optional hooks let `/bin/rm -rf .sci`, `\rm -rf .sci`, `bash -c -- "git stash"` and `sh -c $'git stash'`
+  through.
+- `install.py` moved two old copies backed up in the same second (`--project` with both `.claude/skills` and
+  `.agents/skills`) to one backup folder, so the second ended up inside the first. Each now gets its own folder.
+- `install.py` reported Codex hooks as disabled unless `config.toml` had `[features] hooks = true`. Current Codex
+  runs hooks by default, so they now count as off only when `config.toml` sets `hooks = false`.
+- `install.ps1` split `SCI_ARGS` at every space, which broke quoted values such as `--project "C:\My Repo"`.
+- `install.sh` failed with a bare `cp` error when `SCI_SOURCE` named a file that does not exist; it now says
+  what is wrong.
+
+### Added
+- After a failed verify, `check` reruns only the failing test files of a jest, vitest, `node --test` or
+  `bun test` suite, and of `npm test` when package.json's test script runs jest or vitest. It already did this for
+  pytest, unittest and cargo.
+- A check that rewrites a file in the task's scope prints a note: a file that changes on every run never matches
+  the verified version.
+
 ## [3.4.0] - 2026-11-22
 
 Rust and JavaScript/TypeScript are first-class next to Python, `verify` no longer passes a suite that hides new

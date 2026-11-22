@@ -42,7 +42,12 @@
 
     $InstallArgs = @($InstallArgs | Where-Object { $_ })
     if ($InstallArgs.Count -eq 0 -and $env:SCI_ARGS) {
-        $InstallArgs = @($env:SCI_ARGS -split '\s+' | Where-Object { $_ })
+        # Quoted values keep their spaces: $env:SCI_ARGS = '--project "C:\My Repo"'
+        $InstallArgs = @([regex]::Matches($env:SCI_ARGS, '"([^"]*)"|''([^'']*)''|(\S+)') | ForEach-Object {
+            if ($_.Groups[1].Success) { $_.Groups[1].Value }
+            elseif ($_.Groups[2].Success) { $_.Groups[2].Value }
+            else { $_.Groups[3].Value }
+        })
     }
     $repo = if ($env:SCI_REPO) { $env:SCI_REPO } else { 'Nag681/sci-harness' }
     $ref = if ($env:SCI_REF) { $env:SCI_REF } else { 'main' }

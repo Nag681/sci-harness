@@ -72,6 +72,7 @@ main() {
   else
     archive=$tmp/source.tar.gz
     if [ -n "$src" ]; then
+      [ -f "$src" ] || die "SCI_SOURCE is neither a folder nor a .tar.gz file: $src"
       cp "$src" "$archive"
     else
       if [ -n "$token" ]; then

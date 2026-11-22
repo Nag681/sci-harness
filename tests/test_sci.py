@@ -1513,6 +1513,91 @@ class TestUnits(unittest.TestCase):
         self.assertFalse(sci.same_syntax(a, a.replace("(w: f64, h: f64)", "(\n    w: f64,\n    h: f64,\n)"),
                                          lines=True, path="src/lib.rs"))
 
+    def test_rust_regions_start_at_the_first_attribute_of_the_item(self):
+        src = ('#[cfg(feature = "slow")]\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {}\n}\n\n'
+               '#[ignore]\n#[test]\nfn top() {}\n')
+        sep = "\n%s\n" % sci.REGION_SEP
+        self.assertEqual([r.splitlines()[0] for r in sci.test_region_text("src/lib.rs", src).split(sep)],
+                         ['#[cfg(feature = "slow")]', "#[ignore]"])
+        self.assertEqual([r.splitlines()[0] for r in sci.test_region_text("src/lib.rs", src, legacy=True).split(sep)],
+                         ["#[cfg(test)]", "#[test]"])
+
+    def test_rust_lexer_escaped_quotes_and_c_strings(self):
+        self.assertNotIn("{", sci.rust_mask("let v = ['\\'','{'];"))
+        self.assertNotIn("{", sci.rust_mask('let s = cr#"a"{b"#; let t = c"x{";'))
+        self.assertEqual(sci.rust_tokens("let c = '\\''; let d = 1;")[3:5], ["'\\''", ";"])
+        src = ("#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() { let v = ['\\'', '{']; let s = cr#\"a\"{b\"#; }\n}\n"
+               "pub fn after() {}\n")
+        self.assertNotIn("after", sci.test_region_text("src/lib.rs", src))
+
+    def test_rust_attributes_that_switch_off_an_existing_test(self):
+        old = "#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() { assert!(true); }\n}\n"
+        for new, attr in [(old.replace("#[cfg(test)]", '#[cfg(feature = "nope")]\n#[cfg(test)]'), '#[cfg(feature = "nope")]'),
+                          (old.replace("    #[test]", "    #[test]\n    #[should_panic]"), "#[should_panic]"),
+                          (old.replace("    #[test]", "    #[cfg_attr(miri, ignore)]\n    #[test]"), "#[cfg_attr(miri, ignore)]")]:
+            issues = sci.rust_attr_issues(old, new)
+            self.assertEqual(len(issues), 1, new)
+            self.assertTrue(issues[0].startswith(attr + " added to existing "), issues)
+        added = old.replace("}\n}", "}\n    #[test]\n    #[should_panic]\n    fn u() { panic!() }\n}")
+        self.assertEqual(sci.rust_attr_issues(old, added), [])  # a new test may expect a panic
+        self.assertEqual(sci.rust_attr_issues(old, old.replace("assert!(true)", "assert!(1 + 1 == 2)")), [])
+
+    def test_jest_timing_suffix_and_cargo_workspaces(self):
+        self.assertEqual(sci.extract_failures([" FAIL  src/cart.test.ts (5.123 s)", "  ● cart › totals",
+                                               " PASS  src/ok.test.ts (0.5 s)", "  ● not this"]),
+                         ["src/cart.test.ts", "src/cart.test.ts › cart › totals"])
+        for cmd, stops in [("cargo test --lib", False), ("cargo test --lib --workspace", True),
+                           ("cargo test --lib --all", True), ("cargo test --lib -p geo --workspace", False),
+                           ("cargo test --lib --package=geo", False)]:
+            self.assertEqual(sci.stops_early(cmd), stops, cmd)
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        Path(d, "Cargo.toml").write_text('[workspace]\nmembers = ["geo", "io"]\n', encoding="utf-8")
+        old = list(sci._ROOT)
+        sci._ROOT[:] = [d]
+        try:
+            self.assertTrue(sci.cargo_virtual_workspace())
+            self.assertTrue(sci.stops_early("cargo test --lib"))
+            self.assertFalse(sci.stops_early("cargo test --lib -p geo"))
+            Path(d, "Cargo.toml").write_text('[package]\nname = "geo"\n\n[workspace]\n', encoding="utf-8")
+            self.assertFalse(sci.stops_early("cargo test --lib"))
+        finally:
+            sci._ROOT[:] = old
+
+    def test_js_suites_rerun_only_the_failing_files(self):
+        files = {"src/cart.test.ts", "src/math.test.ts", "test/cart.test.mjs"}
+        self.assertEqual(sci.narrow_suite("npx jest", ["src/cart.test.ts", "src/cart.test.ts › cart › totals"], files),
+                         "npx jest src/cart.test.ts")
+        self.assertEqual(sci.narrow_suite("npx vitest run", ["src/math.test.ts > adds > negatives"], files),
+                         "npx vitest run src/math.test.ts")
+        self.assertEqual(sci.narrow_suite("node --test", ["test/cart.test.mjs > totals"], files),
+                         "node --test test/cart.test.mjs")
+        self.assertIsNone(sci.narrow_suite("npx jest", ["src/gone.test.ts"], files))  # not a file sci knows
+        self.assertIsNone(sci.narrow_suite("npx jest", [], files))
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        old = list(sci._ROOT)
+        sci._ROOT[:] = [d]
+        try:
+            self.assertIsNone(sci.narrow_suite("npm test", ["src/cart.test.ts"], files))  # no package.json
+            Path(d, "package.json").write_text('{"scripts": {"test": "jest --ci"}}', encoding="utf-8")
+            self.assertEqual(sci.narrow_suite("npm test", ["src/cart.test.ts"], files), "npm test -- src/cart.test.ts")
+            Path(d, "package.json").write_text('{"scripts": {"test": "mocha"}}', encoding="utf-8")
+            self.assertIsNone(sci.narrow_suite("npm test", ["src/cart.test.ts"], files))
+        finally:
+            sci._ROOT[:] = old
+
+    def test_a_cargo_filter_on_the_crate_roots_tests_locks_the_crate_root(self):
+        sb = Sandbox(self)
+        sb.write("src/lib.rs", RUST_LIB)
+        sb.write("src/geo/mod.rs", "pub fn x() {}\n")
+        sb.git("add", "-A")
+        sb.git("commit", "-q", "-m", "crate")
+        repo = sci.Repo(sb.root)
+        for verify, want in [("cargo test -q --lib tests::area", ["src/lib.rs"]),
+                             ("cargo test -q geo::tests::x", ["src/geo/mod.rs"])]:
+            self.assertEqual(sci.rust_lock_candidates(repo, sci.DEFAULT_CONFIG, {"verify": verify}, []), want, verify)
+
     def test_data_files_named_like_tests_are_not_tests(self):
         cfg = sci.DEFAULT_CONFIG
         for p, want in [("test_output.json", False), ("results/test_run.log", False), ("tests/data/x.json", True),
@@ -2081,6 +2166,153 @@ class TestEnablers(unittest.TestCase):
         out = sb.finish_rk2()
         self.assertIn("All tasks done and the final verify passed", out)
 
+    def test_files_a_hook_changes_after_the_commit_need_a_final_verify(self):
+        sb = Sandbox(self)
+        sb.init()
+        hook = sb.write(".git/hooks/post-commit", "#!/bin/sh\necho '# touched by a hook' >> pkg/core.py\n")
+        hook.chmod(0o755)
+        sb.ok("task", "add", "t", "--verify", "%s tests.test_core -q" % UT, "--scope", "pkg/core.py")
+        sb.ok("task", "start")
+        sb.ok("lock", "--none", "a refactor guarded by existing tests")
+        sb.write("pkg/core.py", sb.read("pkg/core.py") + "\n\ndef double(x):\n    return 2 * x\n")
+        sb.ok("verify")
+        out = sb.ok("done", "-m", "feat: double")
+        self.assertIn("Hooks changed files after commit", out)
+        self.assertNotIn("final verify passed", out)
+        self.assertIsNone((sb.state()["last_verify"] or {}).get("by_done"))
+
+
+OUTPUTS5 = "%s -c \"import time; [open('tests/out%%d.dat' %% i, 'w').write(repr(time.time())) for i in range(5)]\""
+REPORT = ("%s -c \"import os, time; t = open('report.txt').read() if os.path.exists('report.txt') else ''; "
+          "'final' in t or open('report.txt', 'w').write(repr(time.time()))\"")
+
+
+class TestOutputs(unittest.TestCase):
+    """Files a check writes are ignored, without ever unguarding a test (3.4.0 ignored tests/** and lost its guards)."""
+
+    def test_outputs_in_a_test_folder_never_unguard_its_tests(self):
+        sb = Sandbox(self)
+        sb.init()
+        sb.ok("task", "add", "t1", "--verify", "%s tests.test_core -q" % UT, "--scope", "pkg/core.py")
+        sb.ok("task", "start")
+        sb.ok("lock", "tests/test_core.py")
+        sb.ok("verify")
+        sb.ok("done", "-m", "T1")
+        sb.write("tests/test_two.py", TEST_CORE.replace("TestScale", "TestTwo"))
+        sb.ok("task", "add", "t2", "--verify", (OUTPUTS5 % PYQ) + " && %s tests.test_two -q" % UT,
+              "--scope", "pkg/core.py")
+        sb.ok("task", "start")
+        sb.ok("check")
+        sb.ok("lock", "tests/test_two.py")
+        out = sb.ok("check")  # the second run rewrites the five files
+        self.assertIn("sci ignores them from now on", out)
+        ign = json.loads(sb.read(".sci/config.json"))["ignore_globs"]
+        self.assertNotIn("tests/**", ign)
+        self.assertIn("tests/out0.dat", ign)
+        st = sb.state()
+        self.assertIn("tests/test_core.py", st["protected"])
+        self.assertIn("tests/test_two.py", st["tasks"][1]["locked"])
+        sb.write("tests/test_core.py", TEST_CORE.replace("self.assertAlmostEqual(scale(1.5), 3.0, places=7)",
+                                                          "self.assertTrue(True)"))
+        rc, out = sb.sci("check")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("PROTECTED TEST CHANGED", out)
+
+    def test_an_output_written_before_verify_needs_no_second_verify(self):
+        sb = Sandbox(self)
+        sb.init()
+        sb.ok("task", "add", "t", "--verify", "%s -c \"import time; open('report.txt', 'w').write(repr(time.time()))\""
+              " && %s tests.test_core -q" % (PYQ, UT), "--scope", "pkg/core.py")
+        sb.ok("task", "start")
+        sb.ok("run", "%s -c \"open('report.txt', 'w').write('draft')\"" % PYQ)
+        sb.ok("lock", "tests/test_core.py")
+        sb.write("pkg/core.py", sb.read("pkg/core.py") + "\n\ndef double(x):\n    return 2 * x\n")
+        self.assertIn("sci ignores it from now on", sb.ok("verify"))
+        self.assertIn("DONE T1", sb.ok("done", "-m", "feat: double"))
+        self.assertNotIn("report.txt", sb.git("ls-files"))
+
+    def test_a_scope_that_names_an_ignored_output_takes_it_back(self):
+        sb = Sandbox(self)
+        sb.init()
+        sb.ok("task", "add", "t1", "--verify", (REPORT % PYQ) + " && %s tests.test_core -q" % UT, "--scope", "pkg/core.py")
+        sb.ok("task", "start")
+        sb.ok("lock", "tests/test_core.py")
+        sb.ok("check")
+        sb.ok("check")
+        self.assertIn("report.txt", json.loads(sb.read(".sci/config.json"))["ignore_globs"])
+        sb.ok("verify")
+        sb.ok("done", "-m", "T1")
+        sb.ok("task", "add", "t2", "--verify", "%s -c \"assert 'final' in open('report.txt').read()\"" % PYQ,
+              "--scope", "report.txt")
+        out = sb.ok("task", "start")
+        self.assertIn("sci no longer ignores it", out)
+        sb.write("report.txt", "final report\n")
+        sb.ok("lock", "--none", "the report is checked by its verify command")
+        sb.ok("verify")
+        out = sb.ok("done", "-m", "docs: the report")
+        self.assertIn("report.txt", out)
+        self.assertIn("report.txt", sb.git("ls-files"))
+
+    def test_a_guarded_file_the_check_rewrites_is_output_listed_for_review(self):
+        sb = Sandbox(self)
+        sb.init()
+        sb.ok("task", "add", "t", "--verify", "%s -c \"import time; open('result.json', 'w').write(repr(time.time()))\""
+              " && %s tests.test_core -q" % (PYQ, UT), "--scope", "pkg/core.py")
+        sb.ok("task", "start")
+        sb.ok("check")
+        sb.ok("config", "remove", "ignore_globs", "result.json")
+        sb.ok("lock", "result.json", "tests/test_core.py")
+        out = sb.ok("check")
+        self.assertIn("was guarded as a test, but the check rewrites it", out)
+        self.assertNotIn("LOCKED FILE CHANGED", out)
+        st = sb.state()
+        self.assertNotIn("result.json", st["tasks"][0]["locked"])
+        self.assertTrue(any(r["kind"] == "ignored-test" for r in st["review"]))
+
+    def test_narrowing_test_globs_is_listed_for_review(self):
+        sb = Sandbox(self)
+        sb.init()
+        out = sb.ok("config", "set", "test_globs", "[]")
+        self.assertIn("no longer count as tests", out)
+        self.assertTrue(any(r["kind"] == "test-globs" for r in sb.state()["review"]))
+
+
+class TestFreshStart(unittest.TestCase):
+    def test_the_check_after_a_fresh_start_costs_no_strike_and_a_restart_clears_fresh_starts(self):
+        sb = Sandbox(self)
+        sb.init()
+        sb.add_rk2_task()
+        sb.ok("task", "start")
+        sb.write_rk2_test()
+        sb.sci("check")
+        sb.ok("lock")
+        for i in range(3):
+            sb.write_rk2(good=False)
+            sb.write("pkg/core.py", sb.read("pkg/core.py") + "\n# attempt %d\n" % i)
+            sb.sci("check")
+        self.assertTrue(sb.state()["tasks"][0]["stop"])
+        sb.ok("restore", "--to", "start")
+        sb.sci("check")  # the confirmation check: it fails, as at the start, but is not a fix attempt
+        self.assertEqual(sb.state()["tasks"][0]["strikes"], 0)
+        sb.ok("task", "block", "T1", "--reason", "which order should rk2 have here?")
+        sb.ok("task", "unblock", "T1", "--answer", "second order")
+        sb.ok("task", "start", "T1")
+        self.assertEqual(sb.state()["tasks"][0]["resets"], 0)
+
+    def test_a_test_locked_then_unlocked_in_a_task_is_protected_after_done(self):
+        sb = Sandbox(self)
+        sb.init()
+        sb.ok("task", "add", "t", "--verify", "%s tests.test_core -q" % UT, "--scope", "pkg/core.py")
+        sb.ok("task", "start")
+        sb.ok("lock", "tests/test_core.py")
+        sb.ok("unlock", "--reason", "the expected value must follow the new scale factor")
+        self.assertEqual(sb.state()["tasks"][0]["locked"], {})
+        sb.write("tests/test_core.py", TEST_CORE.replace("places=7", "places=8"))
+        sb.ok("lock", "--none", "the edited test is the acceptance test")
+        sb.ok("verify")
+        sb.ok("done", "-m", "test: tighter")
+        self.assertIn("tests/test_core.py", sb.state()["protected"])
+
 
 RUST_LIB = '''\
 pub fn area(w: f64, h: f64) -> f64 {
@@ -2143,6 +2375,78 @@ class TestRust(unittest.TestCase):
         sb.ok("check", timeout=600)
 
 
+class TestRustGuard(unittest.TestCase):
+    """Rust test regions without cargo: the task checks run the Python suite."""
+    def crate(self, lib=RUST_LIB):
+        sb = Sandbox(self)
+        sb.write("src/lib.rs", lib)
+        sb.git("add", "-A")
+        sb.git("commit", "-q", "-m", "crate")
+        sb.init()
+        sb.ok("task", "add", "area", "--verify", "%s tests.test_core -q" % UT, "--scope", "src/lib.rs")
+        sb.ok("task", "start")
+        return sb
+
+    def test_an_attribute_stacked_above_a_locked_test_module_is_a_change(self):
+        sb = self.crate()
+        sb.ok("lock", "src/lib.rs")
+        sb.write("src/lib.rs", RUST_LIB.replace("#[cfg(test)]", '#[cfg(feature = "never")]\n#[cfg(test)]'))
+        rc, out = sb.sci("check")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("LOCKED TESTS CHANGED: src/lib.rs", out)
+        out = sb.ok("restore", "--paths", "src/lib.rs")
+        self.assertIn("Restored the locked tests in src/lib.rs", out)
+        self.assertEqual(sb.read("src/lib.rs"), RUST_LIB)
+
+    def test_an_existing_test_switched_off_by_an_attribute_is_weakened(self):
+        sb = self.crate()
+        sb.write("src/lib.rs", RUST_LIB.replace("    #[test]", "    #[test]\n    #[should_panic]"))
+        rc, out = sb.sci("check")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("EXISTING TEST WEAKENED", out)
+        self.assertIn("#[should_panic] added to existing fn area_of_rectangle", out)
+
+    def test_regions_recorded_by_340_are_upgraded_without_flagging(self):
+        lib = RUST_LIB.replace("#[cfg(test)]", "#[allow(clippy::float_cmp)]\n#[cfg(test)]")
+        sb = self.crate(lib)
+        sb.ok("lock", "src/lib.rs")
+        st = sb.state()
+        legacy = sci.sha256_text(sci.test_region_text("src/lib.rs", lib, legacy=True))
+        new = st["tasks"][0]["locked_regions"]["src/lib.rs"]
+        self.assertNotEqual(legacy, new)
+        st["tasks"][0]["locked_regions"]["src/lib.rs"] = legacy  # as sci 3.4.0 recorded it
+        del st["regions_v"]
+        sb.write(".sci/state.json", json.dumps(st))
+        sb.ok("check")
+        st = sb.state()
+        self.assertEqual((st["regions_v"], st["tasks"][0]["locked_regions"]["src/lib.rs"]), (2, new))
+        sb.write("src/lib.rs", lib.replace("#[allow(clippy::float_cmp)]", '#[cfg(feature = "never")]'))
+        rc, out = sb.sci("check")
+        self.assertIn("LOCKED TESTS CHANGED: src/lib.rs", out)
+
+    def test_restoring_tests_that_no_longer_line_up_restores_the_whole_file_and_says_so(self):
+        sb = self.crate()
+        sb.ok("lock", "src/lib.rs")
+        sb.write("src/lib.rs", RUST_LIB.replace("    0.0\n", "    w * h\n").replace("< 1e-12", "< 1.0")
+                 + "\n#[test]\nfn extra() {}\n")
+        out = sb.ok("restore", "--paths", "src/lib.rs")
+        self.assertIn("WARNING: the tests in src/lib.rs no longer line up", out)
+        self.assertIn("whole file was restored, code included", out)
+        self.assertEqual(sb.read("src/lib.rs"), RUST_LIB)
+
+    def test_unlock_without_paths_unlocks_locked_tests_in_source_files(self):
+        sb = self.crate()
+        sb.ok("lock", "src/lib.rs")
+        out = sb.ok("unlock", "--reason", "the tolerance must follow the float32 port")
+        self.assertIn("Unlocked: src/lib.rs", out)
+        self.assertEqual(sb.state()["tasks"][0]["locked_regions"], {})
+        sb.write("src/lib.rs", RUST_LIB.replace("< 1e-12", "< 1e-6"))
+        sb.ok("lock", "--none", "the edited test is the acceptance test")
+        sb.ok("verify")
+        sb.ok("done", "-m", "test: float32 tolerance")
+        self.assertIn("src/lib.rs", sb.state()["protected_regions"])  # it guards later tasks again
+
+
 HOOK = SCI.parent / "sci_hook.py"
 sys.path.insert(0, str(HOOK.parent))
 import sci_hook  # noqa: E402
@@ -2163,7 +2467,8 @@ class TestHooks(unittest.TestCase):
                'bash -c "git stash"', "sh -c 'cd x; git clean -fdx'", ".sci/sci purge --yes",
                ".sci/sci review --clear --yes", 'rm -rf ".sci"', "/usr/bin/git reset --hard", "\\git reset --hard",
                "git restore -SW a.py", 'powershell -Command "git stash"', 'cmd /c "git clean -fd"',
-               "rm -rf .sci/scratch/../state.json"]
+               "rm -rf .sci/scratch/../state.json", "/bin/rm -rf .sci", "\\rm -rf .sci", 'bash -c -- "git stash"',
+               "sh -c $'git stash'"]
         good = ["git status", "git checkout -b topic", "git checkout main", "git restore --staged a.py",
                 "git stash list", "git diff", "rm -rf build/.scikit", "git log --oneline", "git push origin topic",
                 "pytest -q", "git commit -m 'fix: x'", '.sci/sci note "never run git stash or git restore" --kind gotcha',

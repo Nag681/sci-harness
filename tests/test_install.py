@@ -101,7 +101,7 @@ class TestInstall(unittest.TestCase):
         for rel in (".claude/skills/" + NAME, ".agents/skills/" + NAME):
             h.assert_provides(self, rel)
         plugin = h.p(".gemini/config/plugins/" + NAME)
-        self.assertEqual(json.loads((plugin / "plugin.json").read_text(encoding="utf-8"))["version"], "3.4.0")
+        self.assertEqual(json.loads((plugin / "plugin.json").read_text(encoding="utf-8"))["version"], "3.4.1")
         self.assertTrue((plugin / "skills" / NAME / "SKILL.md").is_file())
         self.assertFalse((plugin / "hooks.json").exists())
         self.assertFalse(h.p(".claude/settings.json").exists())
@@ -252,6 +252,31 @@ class TestInstall(unittest.TestCase):
         self.assertTrue((manual / "SKILL.md").is_file())
         self.assertTrue((other / "SKILL.md").is_file())
         self.assertFalse(os.path.lexists(str(h.p(".claude/skills/" + NAME))))
+
+    def test_codex_hooks_count_as_on_unless_its_config_turns_them_off(self):
+        h = Home(self)
+        out = h.run("--hooks")
+        self.assertNotIn("turned off", out)
+        status = h.run("--status")
+        self.assertRegex(status, r"Codex .* on \(3 handlers\)\n")
+        h.p(".codex/config.toml").write_text('model = "x"\n\n[features]\nhooks = false\n')
+        self.assertIn("turned off: config.toml has [features] hooks = false", h.run("--status"))
+        self.assertIn("Codex hooks are turned off in", h.run("--hooks"))
+
+    def test_two_old_copies_backed_up_in_the_same_second_keep_both(self):
+        h = Home(self, agents=("claude",))
+        proj = h.root / "proj"
+        for sub in (".claude/skills", ".agents/skills"):
+            old = proj / sub / NAME
+            old.mkdir(parents=True)
+            (old / "SKILL.md").write_text("---\nname: %s\n---\nold copy in %s\n" % (NAME, sub))
+        h.run("--project", str(proj))
+        backups = sorted(h.p(".local/share/agent-skills/backups").iterdir())
+        self.assertEqual(len(backups), 2, backups)
+        self.assertEqual(sorted((b / "SKILL.md").read_text().splitlines()[-1] for b in backups),
+                         ["old copy in .agents/skills", "old copy in .claude/skills"])
+        for sub in (".claude/skills", ".agents/skills"):
+            self.assertTrue((proj / sub / NAME / MARK).is_file(), sub)
 
     def test_copy_mode_and_project(self):
         h = Home(self, agents=("claude",))

@@ -116,6 +116,12 @@ class TestInstallSh(unittest.TestCase):
         self.assertNotEqual(rc, 0, out)
         self.assertIn("Unknown agent", out)
 
+    def test_explains_a_missing_source(self):
+        b = Bootstrap(self)
+        rc, out = self.sh(b, "--only", "claude", SCI_SOURCE=(b.root / "no-such.tar.gz").as_posix())
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("SCI_SOURCE is neither a folder nor a .tar.gz file", out)
+
     @unittest.skipIf(WINDOWS, "POSIX PATH handling")
     def test_explains_missing_python(self):
         b = Bootstrap(self)
@@ -151,6 +157,18 @@ class TestInstallPs1(unittest.TestCase):
             rc, out = self.ps(exe, b, script, SCI_SOURCE=ROOT, SCI_ARGS="--only claude")
             self.assertEqual(rc, 0, (exe, out))
             b.assert_installed(out)
+
+    def test_sci_args_keep_quoted_values_whole(self):
+        for exe in POWERSHELLS:
+            b = Bootstrap(self)
+            proj = b.root / "my proj"
+            proj.mkdir()
+            script = "Get-Content -Raw -LiteralPath '%s' | Invoke-Expression" % (ROOT / "install.ps1")
+            for args in ('--only claude --project "%s"' % proj, "--only claude --project '%s'" % proj):
+                rc, out = self.ps(exe, b, script, SCI_SOURCE=ROOT, SCI_ARGS=args)
+                self.assertEqual(rc, 0, (exe, args, out))
+                self.assertTrue((proj / ".claude" / "skills" / NAME / "SKILL.md").is_file(), (exe, args, out))
+                shutil.rmtree(str(proj / ".claude"))
 
     def test_script_block_with_arguments_and_failure_exit_code(self):
         for exe in POWERSHELLS:

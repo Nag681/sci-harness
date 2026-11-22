@@ -62,10 +62,12 @@ rediscovering the same facts after every compaction.
   runs every test (`--no-fail-fast` for cargo).
 - Slow suites: enroll the relevant subset instead, `.sci/sci baseline --cmd "pytest -q tests/heat"`,
   and leave the full suite to the human or CI.
-- After a failed verify, `check` reruns only the tests that failed (pytest, unittest, cargo test).
+- After a failed verify, `check` reruns only the tests that failed (pytest, unittest, cargo test) or the
+  test files that failed (jest, vitest, `node --test`, `bun test`).
 - `.sci/sci out <run> --grep <pattern>` reads long logs.
 - Files a check writes (logs, reports, coverage) are ignored from then on, so they never block `done`
-  or get committed. Files in the task scope are never ignored.
+  or get committed. Files in the task scope are never ignored, and a folder is ignored as a whole only
+  when it holds no tests.
 
 ## 6. Output hygiene (protects your context window)
 
@@ -83,7 +85,10 @@ Rust:
 - Unit tests in `#[cfg(test)] mod tests` live inside the source file. `lock` locks only those tests
   (and `#[test]` functions, `proptest!` blocks); the code around them stays editable, and new tests may be
   added. After `done` they are protected like test files. `restore --paths src/x.rs` puts back just the
-  locked tests when only they were changed.
+  locked tests; if a test was added or removed since, it puts back the whole file, code included, and says
+  where your version is saved.
+- Attributes above a test belong to it: adding `#[cfg(feature = "x")]`, `#[cfg_attr(...)]`,
+  `#[ignore]` or `#[should_panic]` to an existing test counts as weakening it.
 - The suite is `cargo test --no-fail-fast -q` (or `cargo nextest run --no-fail-fast`), so a failing
   crate does not hide the others.
 - Add `cargo clippy -q -- -D warnings` to a task's `--verify` (with `&&`) when lint cleanliness is part of

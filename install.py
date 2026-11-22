@@ -188,8 +188,14 @@ def backup_dir(prefix):
     return prefix / "backups"
 
 
+_MOVED = set()  # backup destinations used in this run (a dry run creates none on disk)
+
+
 def move_aside(plan, p, prefix, label):
-    dst = backup_dir(prefix) / ("%s-%s" % (label, STAMP))
+    dst, k = backup_dir(prefix) / ("%s-%s" % (label, STAMP)), 2
+    while os.path.lexists(str(dst)) or dst in _MOVED:  # two folders backed up in the same second
+        dst, k = backup_dir(prefix) / ("%s-%s-%d" % (label, STAMP, k)), k + 1
+    _MOVED.add(dst)
     plan.say("  moved the previous %s to %s" % (tilde(p), tilde(dst)))
     if not plan.dry:
         dst.parent.mkdir(parents=True, exist_ok=True)
@@ -443,12 +449,14 @@ def set_hooks(plan, path, new_events, label, on):
 
 
 def codex_hooks_enabled():
+    """Current Codex runs hooks by default; only `[features] hooks = false` (codex_hooks in old builds) turns them
+    off."""
     try:
         text = (CODEX_HOME / "config.toml").read_text(encoding="utf-8")
     except OSError:
-        return False
+        return True
     sec = re.search(r"^\[features\]\s*$(.*?)(?=^\[|\Z)", text, re.M | re.S)
-    return bool(sec and re.search(r"^\s*hooks\s*=\s*true\b", sec.group(1), re.M))
+    return not (sec and re.search(r"^\s*(?:codex_)?hooks\s*=\s*false\b", sec.group(1), re.M))
 
 
 # --------------------------------------------------------------------------- antigravity plugin
@@ -520,7 +528,7 @@ def apply_hooks(plan, home_dir, agents, on):
         elif kind == "codex":
             set_hooks(plan, CODEX_HOME / "hooks.json", claude_style_hooks(home_dir, None), "Codex", on)
             if on and not codex_hooks_enabled():
-                plan.say("  note: Codex runs hooks only with this in %s:  [features]  hooks = true"
+                plan.say("  note: Codex hooks are turned off in %s ([features] hooks = false); set it to true"
                          % tilde(CODEX_HOME / "config.toml"))
         elif kind == "gemini":
             set_hooks(plan, GEMINI_SETTINGS, gemini_hooks(home_dir), "Gemini CLI", on)
@@ -656,7 +664,7 @@ def cmd_status(args, prefix, home_dir):
         n = count_hooks((data or {}).get("hooks") if isinstance((data or {}).get("hooks"), dict) else {})
         extra = ""
         if label == "Codex" and n and not codex_hooks_enabled():
-            extra = "  (disabled: config.toml lacks [features] hooks = true)"
+            extra = "  (turned off: config.toml has [features] hooks = false)"
         print("  %-12s %-34s %s%s" % (label, tilde(path), ("on (%d handlers)" % n) if n else "off", extra))
     print("detected agents: " + (", ".join(a for a in AGENTS if detected(a)) or "none"))
     return 0
