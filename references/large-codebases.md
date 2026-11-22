@@ -42,10 +42,12 @@ rediscovering the same facts after every compaction.
 
 ## 4. Builds and environments
 
-- Compiled extensions (C, C++, Fortran, Cython, CUDA): tests import the built binary, not your
-  edited source. Set the rebuild command once:
-  `.sci/sci config set build_cmd "pip install -e . --no-build-isolation"` (or `cmake --build build`,
-  `make`, `meson compile -C build`). sci reruns it when matching sources change.
+- `cargo test`, `go test`, jest and vitest compile what they test themselves: no build command needed.
+- Tests that import a built binary (Python extensions in C, C++, Fortran, Cython, CUDA or Rust through
+  PyO3/maturin; tests that run `dist/` output) do not see your edited source until it is rebuilt. Set
+  the rebuild command once: `.sci/sci config set build_cmd "maturin develop"` (or
+  `pip install -e . --no-build-isolation`, `cmake --build build`, `npm run build`). sci reruns it when
+  matching sources change, and when the build command itself changes.
 - If tests need an environment (conda, modules, venv), put the activation in the commands:
   `.sci/sci config set test_cmd "source env.sh && pytest -q"`.
 - Never install packages or change environments without the human's approval.
@@ -55,11 +57,15 @@ rediscovering the same facts after every compaction.
 - Task checks must be targeted: one file (`tests/heat/test_stepper.py`), one test id
   (`tests/heat/test_stepper.py::test_cfl`), a keyword (`-k cfl`) or a marker.
 - Record known failures once with `.sci/sci baseline`. From then on `verify` reruns that suite and
-  fails only on new failures.
+  fails only on new failures. A suite that stops at its first failure (`-x`, `--bail`, plain
+  `cargo test`) would hide new failures behind known ones, so `baseline` records it with the option that
+  runs every test (`--no-fail-fast` for cargo).
 - Slow suites: enroll the relevant subset instead, `.sci/sci baseline --cmd "pytest -q tests/heat"`,
   and leave the full suite to the human or CI.
-- Use `-x` (stop at first failure) for quick loops, and `.sci/sci out <run> --grep <pattern>` to
-  inspect long logs.
+- After a failed verify, `check` reruns only the tests that failed (pytest, unittest, cargo test).
+- `.sci/sci out <run> --grep <pattern>` reads long logs.
+- Files a check writes (logs, reports, coverage) are ignored from then on, so they never block `done`
+  or get committed. Files in the task scope are never ignored.
 
 ## 6. Output hygiene (protects your context window)
 
@@ -67,3 +73,26 @@ rediscovering the same facts after every compaction.
 - Pipe exploratory commands through `head`: `grep -rn "pattern" src | head -30`.
 - Prefer `.sci/sci find`, `.sci/sci map` and `.sci/sci out` because their output is capped and
   the full output is kept in `.sci/runs/`.
+
+## 7. Rust and JavaScript/TypeScript
+
+Rust:
+- Targeted checks: `cargo test -q --lib parser::tests` (a module's unit tests),
+  `cargo test -q --test cli` (the integration test `tests/cli.rs`), `cargo test -q -p engine` (one crate of a
+  workspace). Find code with `.sci/sci find <fn|struct|trait>`; `impl` blocks count as definitions.
+- Unit tests in `#[cfg(test)] mod tests` live inside the source file. `lock` locks only those tests
+  (and `#[test]` functions, `proptest!` blocks); the code around them stays editable, and new tests may be
+  added. After `done` they are protected like test files. `restore --paths src/x.rs` puts back just the
+  locked tests when only they were changed.
+- The suite is `cargo test --no-fail-fast -q` (or `cargo nextest run --no-fail-fast`), so a failing
+  crate does not hide the others.
+- Add `cargo clippy -q -- -D warnings` to a task's `--verify` (with `&&`) when lint cleanliness is part of
+  the task.
+
+JavaScript/TypeScript:
+- Targeted checks: `npx vitest run src/cart.test.ts`, `npx jest src/cart.test.ts -t "totals"`,
+  `node --test test/cart.test.mjs`. sci reads each failing test's name from jest, vitest, node and TAP
+  output.
+- Snapshot files (`__snapshots__/`, `*.snap`) are tests: updating them to make a test pass needs
+  `unlock`, like editing an assertion.
+- Type checking is a check too: `npx tsc --noEmit && npx vitest run src/cart.test.ts`.

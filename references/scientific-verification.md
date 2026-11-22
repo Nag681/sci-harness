@@ -31,6 +31,7 @@ def test_scheme_is_second_order():
     assert errs[0] > errs[1] > errs[2], errs  # error must shrink with refinement
     p = observed_orders(hs, errs)
     assert p[-1] > 2.0 - 0.2, p               # formal order 2, tolerance 0.2
+    assert p[-1] < 2.0 + 1.0, p               # far above the formal order: round-off or a broken error norm
 ```
 
 - Use the finest pair for the verdict; coarse grids are often pre-asymptotic.

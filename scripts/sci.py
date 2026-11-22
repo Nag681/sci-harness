@@ -36,7 +36,7 @@ import threading
 import time
 from pathlib import Path
 
-VERSION = "3.3.1"
+VERSION = "3.4.0"
 SD = ".sci"
 SCHEMA = 1
 WINDOWS = os.name == "nt"
@@ -209,22 +209,33 @@ def glob_re(pat):
     return rx
 
 
+_ANY_CACHE = {}
+
+
+def any_re(pats):
+    """One compiled regex for a list of globs, exact paths and directory prefixes (see match_any)."""
+    key = tuple(pats or ())
+    rx = _ANY_CACHE.get(key)
+    if rx is None:
+        parts = []
+        for p in key:
+            p = p.strip()
+            if p.startswith("./"):
+                p = p[2:]
+            if not p:
+                continue
+            if "*" in p or "?" in p:
+                parts.append(glob_re(p).pattern[:-2])  # without its \Z
+            else:
+                parts.append(re.escape(p.rstrip("/")) + "(?:/.*)?")
+        rx = _ANY_CACHE[key] = re.compile("(?:%s)\\Z" % "|".join(parts)) if parts else None
+    return rx
+
+
 def match_any(path, pats):
     """True if repo-relative posix `path` matches any glob, exact path, or directory prefix."""
-    for p in pats or ():
-        p = p.strip()
-        if p.startswith("./"):
-            p = p[2:]
-        if not p:
-            continue
-        if "*" in p or "?" in p:
-            if glob_re(p).match(path):
-                return True
-        else:
-            q = p.rstrip("/")
-            if path == q or path.startswith(q + "/"):
-                return True
-    return False
+    rx = any_re(pats)
+    return bool(rx is not None and rx.match(path))
 
 
 def norm_rel(root, p):
@@ -245,9 +256,10 @@ def norm_rel(root, p):
 
 def git(root, args, env=None, check=True, input=None, timeout=None):
     try:
-        p = subprocess.run(["git"] + list(args), cwd=str(root), env=env, input=input,
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                           encoding="utf-8", errors="replace", timeout=timeout)
+        # No stdin unless given: git must never wait for the agent's terminal (a credential or pinentry prompt).
+        kw = {"input": input} if input is not None else {"stdin": subprocess.DEVNULL}
+        p = subprocess.run(["git"] + list(args), cwd=str(root), env=env, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, encoding="utf-8", errors="replace", timeout=timeout, **kw)
     except FileNotFoundError:
         raise Refuse("git is not installed or not on PATH.")
     if check and p.returncode != 0:
@@ -431,13 +443,13 @@ def new_state(objective):
         "schema": SCHEMA, "version": VERSION, "objective": objective or "", "objective_history": [],
         "created": t, "updated": t, "session": 1, "active": None, "tasks": [],
         "next_task": 1, "next_hyp": 1, "next_note": 1, "hyps": [], "notes": [], "now": None,
-        "goldens": {}, "protected": {}, "acks": {}, "review": [], "baseline": None, "runs": 0,
+        "goldens": {}, "protected": {}, "protected_regions": {}, "acks": {}, "review": [], "baseline": None, "runs": 0,
         "paused": False, "last_verify": None, "violations": [], "last_build_tree": None,
         "passes": {}, "durations": {},
     }
 
 
-TASK_DEFAULTS = (("scope", []), ("invariants", []), ("deps", []), ("locked", {}), ("lock_none", None),
+TASK_DEFAULTS = (("scope", []), ("invariants", []), ("deps", []), ("locked", {}), ("lock_none", None), ("unlocked", []), ("locked_regions", {}),
                  ("strikes", 0), ("stop", None), ("stop_cycles", 0), ("last_check", None), ("attempts", 0),
                  ("why", ""), ("block_reason", ""), ("status", "todo"))
 
@@ -655,8 +667,30 @@ def spec_hash(t):
                                    "inv": t["invariants"]}, sort_keys=True))
 
 
+# Default test globs that match by file name. They make a file a test only if it is source code or lies in a test
+# directory: test_output.json, written by a test run, is not a test.
+NAME_TEST_GLOBS = frozenset(("**/test_*", "**/*_test.*", "**/*_tests.*", "**/*.test.*", "**/*.spec.*",
+                             "**/*_spec.*", "**/*Test.*", "**/*Tests.*"))
+TEST_DIR_RE = re.compile(r"(?:^|/)(?:tests?|testing|spec|__tests__|testdata)/")
+_NON_NAME_GLOBS = {}
+
+
+RS_TEST_FILE_RE = re.compile(r"(?:^|/)tests?\.rs$")  # `#[cfg(test)] mod tests;` keeps a module's tests there
+SNAPSHOT_RE = re.compile(r"(?:^|/)__snapshots__/|\.snap$")  # jest/vitest and Rust insta snapshots: expected values
+
+
 def is_test(path, cfg):
-    return match_any(path, cfg.get("test_globs"))
+    pats = cfg.get("test_globs")
+    if SNAPSHOT_RE.search(path) or RS_TEST_FILE_RE.search(path):
+        return True
+    if not match_any(path, pats):
+        return False
+    if SRC_EXT_RE.search(path) or TEST_DIR_RE.search(path):
+        return True
+    key = tuple(pats or ())
+    if key not in _NON_NAME_GLOBS:
+        _NON_NAME_GLOBS[key] = tuple(p for p in key if p not in NAME_TEST_GLOBS)
+    return match_any(path, _NON_NAME_GLOBS[key])
 
 
 def is_doc(path, cfg):
@@ -665,16 +699,106 @@ def is_doc(path, cfg):
 
 # Commands that may read source as text, so that a comment changes what they check. Broad on purpose: a false
 # match only costs a re-verify. `cov` must not follow a letter, or unittest's `discover` would match.
-SOURCE_TEXT_RE = re.compile(r"lint|flake|format|fmt|style|mypy|pyright|pytype|pyre|black|isort|yapf|bandit|vulture|"
+SOURCE_TEXT_RE = re.compile(r"lint|clippy|flake|format|fmt|style|mypy|pyright|pytype|pyre|black|isort|yapf|bandit|vulture|"
                             r"ruff|pycodestyle|pyflakes|pydocstyle|interrogate|doctest|(?<![a-z])cov|"
                             r"(?<![\w.])(?:grep|egrep|fgrep|rg|ag|ack|awk|sed|diff|cmp|wc|cat|head|tail|git|md5sum|"
                             r"sha\d*sum)(?![\w.])", re.I)
 
 
-def same_syntax(a, b, lines=False):
-    """True when two versions of a Python file parse to the same syntax tree, docstrings included: they differ only
-    in comments or layout. With `lines`, every node must also keep its line number (warnings and tracebacks print
-    line numbers, which a golden output would compare)."""
+RS_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|\d[\w.]*|::|->|=>|\.\.=?|[&|<>=!+\-*/%^]=?|\S")
+
+
+def rust_tokens(text, lines=False):
+    """Rust source as tokens without plain comments and layout. Doc comments (///, //!, /** */, /*! */) stay: cargo
+    runs the examples in them as doc tests. With `lines`, each token carries its line number. None if unreadable."""
+    if text is None:
+        return None
+    out, i, n, line = [], 0, len(text), 1
+
+    def add(tok):
+        out.append((tok, line) if lines else tok)
+    while i < n:
+        c = text[i]
+        if c == "\n":
+            line += 1
+            i += 1
+        elif c.isspace():
+            i += 1
+        elif text.startswith("//", i):
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            if text.startswith(("///", "//!"), i) and not text.startswith("////", i):
+                add(text[i:j].rstrip())
+            i = j
+        elif text.startswith("/*", i):
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if text.startswith("/*", j):
+                    depth, j = depth + 1, j + 2
+                elif text.startswith("*/", j):
+                    depth, j = depth - 1, j + 2
+                else:
+                    j += 1
+            if text.startswith(("/**", "/*!"), i) and not text.startswith(("/***", "/**/"), i):
+                add(text[i:j])
+            line += text.count("\n", i, j)
+            i = j
+        elif c in "rb" and (i == 0 or not RS_IDENT.match(text[i - 1])) and RS_RAW_RE.match(text, i):
+            m = RS_RAW_RE.match(text, i)
+            end = text.find('"' + m.group(1), m.end())
+            end = n if end < 0 else end + 1 + len(m.group(1))
+            add(text[i:end])
+            line += text.count("\n", i, end)
+            i = end
+        elif c == '"' or (c == "b" and text.startswith('b"', i)):
+            j = i + (2 if c == "b" else 1)
+            while j < n and text[j] != '"':
+                j += 2 if text[j] == "\\" else 1
+            add(text[i:j + 1])
+            line += text.count("\n", i, j + 1)
+            i = j + 1
+        elif c == "'" and i + 2 < n and (text[i + 1] == "\\" or text[i + 2] == "'"):
+            j = text.find("'", i + 2)
+            j = n if j < 0 else j
+            add(text[i:j + 1])
+            i = j + 1
+        else:
+            m = RS_TOKEN_RE.match(text, i)
+            add(m.group(0))
+            i = m.end()
+    return _drop_trailing_commas(out)
+
+
+def _drop_trailing_commas(toks):
+    """Tokens without the trailing comma of a bracketed list of two or more items, which rustfmt adds when it wraps
+    a list. A one-item group keeps it: `(x,)` is a tuple, `(x)` is not."""
+    out, commas = [], []
+
+    def val(t):
+        return t[0] if isinstance(t, tuple) else t
+    for t in toks:
+        v = val(t)
+        if v in ("(", "[", "{"):
+            commas.append(0)
+        elif v in (")", "]", "}"):
+            if out and val(out[-1]) == "," and commas and commas[-1] >= 2:
+                out.pop()
+            if commas:
+                commas.pop()
+        elif v == "," and commas:
+            commas[-1] += 1
+        out.append(t)
+    return out
+
+
+def same_syntax(a, b, lines=False, path=".py"):
+    """True when two versions of a source file differ only in comments or layout: Python files that parse to the
+    same syntax tree (docstrings included), Rust files with the same tokens (doc comments included). With
+    `lines`, everything must also keep its line number (warnings, tracebacks and panics print line numbers,
+    which a golden output would compare)."""
+    if path.endswith(".rs"):
+        ta, tb = rust_tokens(a, lines), rust_tokens(b, lines)
+        return ta is not None and ta == tb
     try:
         ta, tb = ast.parse(a), ast.parse(b)
     except (SyntaxError, ValueError, TypeError):
@@ -698,13 +822,13 @@ def unseen_changes(store, old, new):
         cmds = step_commands(st, store.cfg)
         guarded = set(st.get("protected") or {}) | set((active_task(st) or {}).get("locked") or {})
         before = tree_entries(repo, old)
-        if any(s_ != "M" or not p.endswith(".py") or p in guarded or before.get(p, (0,))[0] != files[p][0]
+        if any(s_ != "M" or not p.endswith((".py", ".rs")) or p in guarded or before.get(p, (0,))[0] != files[p][0]
                for s_, p in code) or any(
                 SOURCE_TEXT_RE.search(c) or any(w.rsplit("/", 1)[-1].lower() in DOC_TOOLS for w in verify_tokens(c))
                 for c in cmds):
             return None
         keep_lines = bool(st.get("goldens"))
-        if not all(same_syntax(blob_text(repo, old, p), blob_text(repo, new, p), keep_lines) for _, p in code):
+        if not all(same_syntax(blob_text(repo, old, p), blob_text(repo, new, p), keep_lines, p) for _, p in code):
             return None
     return [p for _, p in changes]
 
@@ -737,13 +861,15 @@ def still_verified(store, live_tree):
 
 
 def is_locked(t):
-    """Acceptance is frozen: files are locked, or `lock` established that there is nothing to lock."""
-    return bool(t.get("locked")) or bool(t.get("lock_none"))
+    """Acceptance is frozen: files or the tests inside source files are locked, or `lock` established that there
+    is nothing to lock."""
+    return bool(t.get("locked")) or bool(t.get("locked_regions")) or bool(t.get("lock_none"))
 
 
 def lock_desc(t):
-    if t.get("locked"):
-        return ", ".join(sorted(t["locked"]))
+    if t.get("locked") or t.get("locked_regions"):
+        return ", ".join(sorted(t.get("locked") or {}) +
+                         ["%s (its tests only)" % p for p in sorted(t.get("locked_regions") or {})])
     if t.get("lock_none"):
         return "(nothing to lock: %s)" % trunc(t["lock_none"], 90)
     return "(nothing yet)"
@@ -767,10 +893,15 @@ FAIL_RES = [
     (re.compile(r"^(\S+::\S+?)\s+(?:FAILED|ERROR)\b"), None),                 # pytest -v
     (re.compile(r"^(?:FAIL|ERROR):\s+(\w+)\s+\(([\w.]+)\)"), lambda m: _dotted(m.group(1), m.group(2))),  # unittest
     (re.compile(r"^\s*--- FAIL:\s+(\S+)"), None),                             # go test
-    (re.compile(r"^test\s+(\S+)\s+\.\.\.\s+FAILED\s*$"), None),               # cargo test
+    (re.compile(r"^test\s+(.+?)\s+\.\.\.\s+FAILED\s*$"), None),               # cargo test (doc tests have spaces)
+    (re.compile(r"^(\S+) --- FAILED\s*$"), None),                             # cargo test -q
+    (re.compile(r"^---- (.+?) stdout ----\s*$"), None),                       # cargo test failure report
+    (re.compile(r"^\s*FAIL \[\s*[\d.]+m?s\]\s+(?:\(\s*\d+/\d+\)\s+)?\S+\s+(\S+)"), None),  # cargo nextest
     (re.compile(r"^\s*\d+/\d+\s+Test\s+#\d+:\s+(\S+)\s+\.*\**\s*(?:Failed|Exception|Timeout|SEGFAULT)"), None),
     (re.compile(r"^\s*\d+\s+-\s+(\S+)\s+\((?:Failed|Timeout|SEGFAULT|Subprocess aborted|Exception|Not Run)\)"), None),
-    (re.compile(r"^\s*FAIL\s+(\S+\.[cm]?[jt]sx?)(?:\s|$)"), None),             # jest, vitest (file)
+    (re.compile(r"^\s*FAIL\s+(\S+\.[cm]?[jt]sx?(?:\s+>\s+[^\[]*?)?)\s*(?:\[.*\])?\s*$"),
+     lambda m: " ".join(m.group(1).split())),                                     # jest (file), vitest (test)
+    (re.compile(r"^\s*not ok \d+ - (.+?)\s*$"), None),                         # TAP: node --test, tape, bats
     (re.compile(r"^\[ERROR\]\s+(?:(\w+)\(([\w$.]+)\)|([\w$.]+))\s+(?:--\s+)?Time elapsed:.*<<<\s*(?:FAILURE|ERROR)!"),
      lambda m: m.group(3) or _dotted(m.group(1), m.group(2))),                     # maven surefire
     (re.compile(r"^\s*([\w$]+(?:\.[\w$]+)+|[\w$]*(?:Test|Spec|IT)\w*)\s+>\s+(\w+)(?:\(\))?\s+FAILED\s*$"),
@@ -793,7 +924,29 @@ SUMMARY_RES = [
     re.compile(r"^((?:Passed|Failed)!\s+-\s+Failed:.*)$"),
     re.compile(r"^(\d+ examples?, \d+ failures?.*)$"),
     re.compile(r"^(Tests: \d+, Assertions: \d+.*)$"),
+    re.compile(r"^(Summary \[.*\b(?:passed|failed)\b.*)$"),                    # cargo nextest
+    re.compile(r"^ℹ (fail \d+)$"),                                            # node --test
+    re.compile(r"^# (fail \d+)$"),                                                 # TAP (node --test, tape)
 ]
+
+FAILCOUNT_RE = re.compile(r"(\d+)\s+(?:tests?\s+)?(?:failed|failures?|errors?)\b|"
+                          r"\b(?:failures?|errors?|failed)\s*[=:]\s*(\d+)|^fail\s+(\d+)$", re.I)
+
+
+def failure_count(lines):
+    """Failed tests counted from every summary line of a run (each cargo test target prints one), or None if the
+    run printed no summary with a count. Only compared between runs of the same command."""
+    n, seen = 0, False
+    for ln in lines:
+        s = ln.strip()
+        for rx in SUMMARY_RES:
+            m = rx.match(s)
+            if m:
+                for g in FAILCOUNT_RE.finditer(m.group(1)):
+                    n += int(next(x for x in g.groups() if x is not None))
+                    seen = True
+                break
+    return n if seen else None
 
 KEY_RE = re.compile(r"^E\s{2,}\S|\b\w*(?:Error|Exception)\b|Traceback \(most recent|panicked at|"
                     r"Segmentation fault|core dumped|\bKilled\b|\bAborted\b|FloatingPointError|"
@@ -824,17 +977,46 @@ def read_log_lines(path, max_bytes=40 * 1024 * 1024):
     return [ln.rsplit("\r", 1)[-1] for ln in text.split("\n")]
 
 
+JEST_FILE_RE = re.compile(r"^\s*(FAIL|PASS)\s+(\S+\.[cm]?[jt]sx?)\s*$")
+JEST_TEST_RE = re.compile(r"^\s+● (.+?)\s*$")                       # "  ● describe › test"
+NODE_AT_RE = re.compile(r"^test at (.+?):\d+:\d+\s*$")                   # node --test, spec reporter
+NODE_FAIL_RE = re.compile(r"^✖ (.+?)(?: \([\d.]+m?s\))?\s*$")       # "✖ name (1.2ms)"
+TAP_DIRECTIVE_RE = re.compile(r"#\s*(?:SKIP|TODO)\b", re.I)
+
+
 def extract_failures(lines):
+    """Ids of the failing tests in a runner's output. Jest and `node --test` name a failing test on a line after its
+    file, so their ids are `file › test` and `file > test`; a file alone (a suite that did not run) is an id too."""
     seen, out = set(), []
+    jest_file = node_file = None
+
+    def add(fid):
+        if fid and fid not in seen:
+            seen.add(fid)
+            out.append(fid)
     for ln in lines:
+        m = JEST_FILE_RE.match(ln)
+        if m:
+            jest_file = m.group(2) if m.group(1) == "FAIL" else None
+        elif jest_file and JEST_TEST_RE.match(ln) and not ln.strip().startswith("● Console"):
+            add("%s › %s" % (jest_file, JEST_TEST_RE.match(ln).group(1)))
+            continue
+        m = NODE_AT_RE.match(ln)
+        if m:
+            node_file = m.group(1)
+            continue
+        if node_file:
+            m, f, node_file = NODE_FAIL_RE.match(ln), node_file, None
+            if m:
+                add("%s > %s" % (f, m.group(1)))
+                continue
         for rx, to_id in FAIL_RES:
             m = rx.match(ln)
             if not m:
                 continue
-            fid = to_id(m) if to_id else m.group(1)
-            if fid not in seen:
-                seen.add(fid)
-                out.append(fid)
+            if rx.pattern.startswith(r"^\s*not ok") and TAP_DIRECTIVE_RE.search(ln):
+                break  # an expected failure or a skipped test
+            add(to_id(m) if to_id else m.group(1))
             break
     return out
 
@@ -1053,18 +1235,22 @@ def report_run(repo, cfg, r, label, quiet_pass=False):
 SKIP_RE = re.compile(
     r"@pytest\.mark\.(?:skip|skipif|xfail)\b|\bpytest\.(?:skip|xfail|importorskip)\s*\(|"
     r"@unittest\.(?:skip|skipIf|skipUnless|expectedFailure)\b|\bself\.skipTest\s*\(|"
-    r"\braise\s+(?:unittest\.)?SkipTest\b|\b(?:it|describe|test)\.(?:skip|todo)\s*\(|"
-    r"\bx(?:it|describe|test)\s*\(|#\[ignore\]|\bt\.Skip(?:Now|f)?\s*\(|@test_skip\b|"
+    r"\braise\s+(?:unittest\.)?SkipTest\b|\b(?:it|describe|test|suite|bench)\.(?:skip|todo|skipIf|fails)\b|"
+    r"\bx(?:it|describe|test)\s*\(|#\[ignore\b|\bt\.Skip(?:Now|f)?\s*\(|@test_skip\b|"
     r"@test_broken\b|@Disabled\b|@Ignore\b|\bGTEST_SKIP\b|\bDISABLED_\w+|\bSkip\s*=|\[Ignore\b|"
     r"markTest(?:Skipped|Incomplete)\s*\(|\b(?:it|describe|test|context)\.only\s*\(|\bf(?:it|describe)\s*\(")
 ASSERT_RE = re.compile(r"\b[aA]ssert\w*|\bexpect\s*\(|\bASSERT_\w+|\bEXPECT_\w+|@test\b|\bisapprox\b|"
                        r"\bcheck_close\b|\ballclose\b|\bisclose\b|\bapprox\s*\(|\bshould\b|"
-                       r"\bt\.(?:Error|Errorf|Fatal|Fatalf|Fail|FailNow)\s*\(")
+                       r"\bt\.(?:Error|Errorf|Fatal|Fatalf|Fail|FailNow)\s*\(|\bprop_assert\w*")
 TRIVIAL_RE = re.compile(r"^\s*(?:assert\s+(?:True|1)\s*(?:#.*)?$|self\.assert(?:True|_)\(\s*(?:True|1)\s*\)|"
-                        r"expect\(\s*true\s*\)|@test\s+true\b)")
-TOL_RE = re.compile(r"\b(rtol|atol|rel_tol|abs_tol|rel|abs|tol|tolerance|eps|epsilon|delta|places|decimal|"
-                    r"significant|ulps?|maxulp)\s*[=:]\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eEdD][-+]?\d+)?)", re.I)
-DIGIT_TOLS = ("places", "decimal", "significant")
+                        r"expect\(\s*true\s*\)|@test\s+true\b|assert!\(\s*true\s*\))")
+DEAD_RE = re.compile(r"^\s*(?:\}\s*else\s+)?if\s*(?:\(\s*(?:false|0)\s*\)|false\b)")  # Rust, Go, JS, C: `if false {`
+TOL_KEYS = (r"rtol|atol|rel_tol|abs_tol|rel|abs|tol|tolerance|eps|epsilon|delta|places|decimal|significant|ulps?|"
+            r"maxulp|max_relative|max_ulps|max_abs_diff")
+TOL_RE = re.compile(r"\b(%s)\s*[=:]\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eEdD][-+]?\d+)?)" % TOL_KEYS, re.I)
+TOL_KEY_RE = re.compile(r"\b(%s)\s*[=:](?!=)" % TOL_KEYS, re.I)
+CLOSE_TO_RE = re.compile(r"\b(toBeCloseTo)\(\s*[^,()]+,\s*(\d+)\s*\)")  # jest/vitest: the number of digits
+DIGIT_TOLS = ("places", "decimal", "significant", "tobecloseto")
 NUM_RE = re.compile(r"(?<![\w.])[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eEdD][-+]?\d+)?(?![\w.])")
 
 
@@ -1094,7 +1280,7 @@ def parse_hunks(diff_text):
 def tol_values(lines):
     vals = {}
     for ln in lines:
-        for m in TOL_RE.finditer(ln):
+        for m in list(TOL_RE.finditer(ln)) + list(CLOSE_TO_RE.finditer(ln)):
             v = _num(m.group(2))
             if v is not None:
                 vals.setdefault(m.group(1).lower(), []).append(v)
@@ -1102,6 +1288,7 @@ def tol_values(lines):
 
 
 def _strip_tols(ln):
+    ln = CLOSE_TO_RE.sub(lambda m: m.group(0)[:m.start(2) - m.start(0)] + "#)", ln)
     return " ".join(TOL_RE.sub(lambda m: m.group(1).lower() + "=#", ln).split())
 
 
@@ -1155,6 +1342,22 @@ def _swallows_failures(node):
     return False
 
 
+def _const_truth(node):
+    """True/False for a constant condition (`True`, `0`, `not True`), else None."""
+    if isinstance(node, ast.Constant):
+        return bool(node.value)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        v = _const_truth(node.operand)
+        return None if v is None else not v
+    return None
+
+
+def _cond_text(node):
+    if isinstance(node, ast.UnaryOp):
+        return "not " + _cond_text(node.operand)
+    return repr(getattr(node, "value", "?"))
+
+
 def py_test_issues(text):
     try:
         tree = ast.parse(text)
@@ -1162,8 +1365,15 @@ def py_test_issues(text):
         return set()
     issues = set()
 
+    def target_name(t):
+        if isinstance(t, ast.Name):
+            return t.id
+        if isinstance(t, ast.Attribute):
+            return "%s.%s" % (target_name(t.value) or "?", t.attr)
+        return None
+
     def scan(body, where):
-        seen = set()
+        seen, classes = set(), set()
         for node in body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
                 if node.name in seen:
@@ -1175,15 +1385,209 @@ def py_test_issues(text):
                         issues.add("early `return` in %s turns the rest of the test into dead code" % node.name)
                         break
                 for sub in ast.walk(node):
-                    if isinstance(sub, ast.If) and isinstance(sub.test, ast.Constant) and not sub.test.value:
-                        issues.add("`if %r:` block in %s never runs" % (sub.test.value, node.name))
+                    if isinstance(sub, ast.If) and _const_truth(sub.test) is False:
+                        issues.add("`if %s:` block in %s never runs" % (_cond_text(sub.test), node.name))
+                    elif (isinstance(sub, ast.If) and _const_truth(sub.test) is True
+                          and any(isinstance(x, ast.Return) for x in sub.body)):
+                        issues.add("early `return` in %s turns the rest of the test into dead code" % node.name)
                     elif _swallows_failures(sub):
                         issues.add("try/except in %s catches assertion failures without re-raising" % node.name)
             elif isinstance(node, ast.ClassDef):
+                if node.name in classes:
+                    issues.add("class %s is defined twice in %s (the later definition silently replaces the earlier "
+                               "tests)" % (node.name, where))
+                classes.add(node.name)
                 scan(node.body, "class " + node.name)
+            elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.Delete)):
+                targets = node.targets if isinstance(node, (ast.Assign, ast.Delete)) else [node.target]
+                for t in targets:
+                    name = target_name(t)
+                    last = (name or "").rsplit(".", 1)[-1]
+                    if name and (last.startswith("test") and ("." in name or last in seen)
+                                 or (isinstance(node, ast.Delete) and name in classes)):
+                        issues.add("%s is %s in %s (the test no longer runs as written)"
+                                   % (name, "deleted" if isinstance(node, ast.Delete) else "replaced by an assignment",
+                                      where))
 
     scan(tree.body, "the module")
     return issues
+
+
+# --------------------------------------------------------------------------- tests inside source files (Rust)
+#
+# Rust unit tests live in the file they test: `#[cfg(test)] mod tests { ... }` and `#[test]` functions. Such a file
+# is code the task changes, so it cannot be locked whole; its test regions are locked, protected and checked for
+# weakening instead, while the code around them stays editable.
+
+RS_IDENT = re.compile(r"[A-Za-z0-9_]")
+RS_RAW_RE = re.compile(r'b?r(#*)"')
+RS_CFG_TEST_RE = re.compile(r"#\[\s*cfg\s*\((?P<arg>[^\]]*)\)\s*\]")
+RS_TEST_ATTR_RE = re.compile(r"#\[\s*(?P<path>(?:\w+\s*::\s*)*\w+)")
+RS_TEST_ATTRS = ("test", "rstest", "quickcheck", "wasm_bindgen_test", "test_case", "proptest", "bench")
+RS_PROPTEST_RE = re.compile(r"\bproptest\s*!\s*\{")
+REGION_SEP = "// ---- sci: next test region ----"
+
+
+def rust_mask(text):
+    """`text` with comments, string and char literals blanked (newlines kept), so braces and attributes can be
+    found with plain searches."""
+    out, i, n = list(text), 0, len(text)
+
+    def blank(a, b):
+        for k in range(a, min(b, n)):
+            if out[k] != "\n":
+                out[k] = " "
+    while i < n:
+        c = text[i]
+        if c == "/" and text.startswith("//", i):
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            blank(i, j)
+            i = j
+        elif c == "/" and text.startswith("/*", i):
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if text.startswith("/*", j):
+                    depth, j = depth + 1, j + 2
+                elif text.startswith("*/", j):
+                    depth, j = depth - 1, j + 2
+                else:
+                    j += 1
+            blank(i, j)
+            i = j
+        elif c in "rb" and (i == 0 or not RS_IDENT.match(text[i - 1])) and RS_RAW_RE.match(text, i):
+            m = RS_RAW_RE.match(text, i)
+            end = text.find('"' + m.group(1), m.end())
+            end = n if end < 0 else end
+            blank(m.end(), end)
+            i = end + 1 + len(m.group(1))
+        elif c == '"':
+            j = i + 1
+            while j < n and text[j] != '"':
+                j += 2 if text[j] == "\\" else 1
+            blank(i + 1, j)
+            i = j + 1
+        elif c == "'":
+            if i + 1 < n and text[i + 1] == "\\":
+                j = text.find("'", i + 2)
+                j = n if j < 0 else j
+                blank(i + 1, j)
+                i = j + 1
+            elif i + 2 < n and text[i + 2] == "'":
+                blank(i + 1, i + 2)
+                i += 3
+            else:
+                i += 1  # a lifetime
+        else:
+            i += 1
+    return "".join(out)
+
+
+def _rs_item_end(m, start):
+    """End offset of the item that starts at `start` in masked text `m`: its matching `}` or its `;`."""
+    depth, i, n = 0, start, len(m)
+    while i < n:
+        c = m[i]
+        if c in "([":
+            depth += 1
+        elif c in ")]":
+            depth -= 1
+        elif c == ";" and depth <= 0:
+            return i + 1
+        elif c == "{" and depth <= 0:
+            d = 0
+            while i < n:
+                if m[i] == "{":
+                    d += 1
+                elif m[i] == "}":
+                    d -= 1
+                    if d == 0:
+                        return i + 1
+                i += 1
+            return n
+        i += 1
+    return n
+
+
+def _rs_skip_attrs(m, i):
+    """Offset of the item after the attributes at `i` (each `#[...]`, brackets balanced)."""
+    n = len(m)
+    while True:
+        while i < n and m[i].isspace():
+            i += 1
+        if not m.startswith("#[", i):
+            return i
+        depth = 0
+        while i < n:
+            if m[i] == "[":
+                depth += 1
+            elif m[i] == "]":
+                depth -= 1
+                if depth == 0:
+                    i += 1
+                    break
+            i += 1
+
+
+def rust_test_spans(text):
+    """[(start, end)] character spans of the test code in Rust source: items under #[cfg(test)], functions with a
+    test attribute (#[test], #[tokio::test], #[rstest], #[test_case(..)] ...) and proptest! blocks."""
+    if "test" not in text:
+        return []
+    m = rust_mask(text)
+    spans = []
+    for a in RS_CFG_TEST_RE.finditer(m):
+        arg = a.group("arg")
+        if re.search(r"\btest\b", arg) and not re.search(r"\bnot\s*\(\s*test\b", arg):
+            spans.append((a.start(), _rs_item_end(m, _rs_skip_attrs(m, a.start()))))
+    for a in RS_TEST_ATTR_RE.finditer(m):
+        last = re.split(r"\s*::\s*", a.group("path"))[-1]
+        if last in RS_TEST_ATTRS or last.startswith("test_"):
+            spans.append((a.start(), _rs_item_end(m, _rs_skip_attrs(m, a.start()))))
+    for a in RS_PROPTEST_RE.finditer(m):
+        spans.append((a.start(), _rs_item_end(m, a.start())))
+    spans.sort()
+    merged = []
+    for s_, e in spans:
+        if merged and s_ <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((s_, e))
+    return merged
+
+
+def has_inline_tests(path):
+    """Whether files like `path` can hold tests inside source code that sci finds (Rust)."""
+    return path.endswith(".rs")
+
+
+def test_region_text(path, text):
+    """The test code inside source file `path` (whole lines), regions separated by REGION_SEP; '' if none."""
+    if text is None or not has_inline_tests(path):
+        return ""
+    blocks = []
+    for s_, e in rust_test_spans(text):
+        a = text.rfind("\n", 0, s_) + 1
+        b = text.find("\n", e)
+        blocks.append(text[a:len(text) if b < 0 else b].rstrip("\n"))
+    return ("\n%s\n" % REGION_SEP).join(blocks)
+
+
+def splice_regions(path, text, regions):
+    """`text` with its test regions replaced by `regions` (a test_region_text), or None if they do not line up."""
+    want = regions.split("\n%s\n" % REGION_SEP) if regions else []
+    spans = rust_test_spans(text)
+    if len(spans) != len(want):
+        return None
+    out, pos = [], 0
+    for (s_, e), block in zip(spans, want):
+        a = text.rfind("\n", 0, s_) + 1
+        b = text.find("\n", e)
+        b = len(text) if b < 0 else b
+        out += [text[pos:a], block]
+        pos = b
+    out.append(text[pos:])
+    return "".join(out)
 
 
 def weakening_issues(path, hunks, old_text=None, new_text=None, strict=False):
@@ -1198,6 +1602,17 @@ def weakening_issues(path, hunks, old_text=None, new_text=None, strict=False):
             issues.append("skip/xfail added: " + trunc(ln.strip(), 90))
         if TRIVIAL_RE.search(ln):
             issues.append("trivial assertion added: " + trunc(ln.strip(), 90))
+        if DEAD_RE.search(ln):
+            issues.append("block that never runs added: " + trunc(ln.strip(), 90))
+    kr, ka = {}, {}  # numeric tolerances removed vs tolerance keywords (any value) added
+    for lines, d, rxs in ((rem, kr, (TOL_RE, CLOSE_TO_RE)), (add, ka, (TOL_KEY_RE, CLOSE_TO_RE))):
+        for ln in lines:
+            for rx in rxs:
+                for m in rx.finditer(ln):
+                    d[m.group(1).lower()] = d.get(m.group(1).lower(), 0) + 1
+    for k in sorted(kr):
+        if ka.get(k, 0) < kr[k]:
+            issues.append("tolerance removed: %s (the default may be looser)" % k)
     n_rem = sum(len(ASSERT_RE.findall(ln)) for ln in rem)
     n_add = sum(len(ASSERT_RE.findall(ln)) for ln in add)
     if n_rem > n_add:
@@ -1206,14 +1621,16 @@ def weakening_issues(path, hunks, old_text=None, new_text=None, strict=False):
     for k in sorted(set(old_t) & set(new_t)):
         o, n = old_t[k], new_t[k]
         if _looser(k, o, n):
-            issues.append("tolerance loosened: %s %g -> %g" % (k, max(o), max(n)))
+            pick = min if k in DIGIT_TOLS else max
+            issues.append("tolerance loosened: %s %g -> %g" % (k, pick(o), pick(n)))
     for h in hunks:
         for a, b in pair_lines(h["rem"], h["add"]):
             # line by line too: a looser tolerance elsewhere in the file must not hide this one
             old_t, new_t = tol_values([a]), tol_values([b])
             for k in sorted(set(old_t) & set(new_t)):
                 if _looser(k, old_t[k], new_t[k]):
-                    issues.append("tolerance loosened: %s %g -> %g" % (k, max(old_t[k]), max(new_t[k])))
+                    pick = min if k in DIGIT_TOLS else max
+                    issues.append("tolerance loosened: %s %g -> %g" % (k, pick(old_t[k]), pick(new_t[k])))
             if not (ASSERT_RE.search(a) or ASSERT_RE.search(b) or TOL_RE.search(a)):
                 continue
             if _skeleton(a) != _skeleton(b):
@@ -1262,9 +1679,14 @@ def run_guard(repo, st, cfg, t, cur_tree):
             found.append(viol("SPEC CHANGED OUTSIDE sci", None,
                               "%s verify/invariants were edited by hand" % task["id"], task["id"]))
     acks = st.get("acks") or {}
-    checked = set()
+    checked = set(t.get("unlocked") or []) if t else set()  # unlocked for this task: open until `done`
+    ign = cfg.get("ignore_globs") or []
+    checked |= set(p for p in list((t or {}).get("locked") or {}) + list((t or {}).get("locked_regions") or {}) +
+                   list(st.get("protected") or {}) + list(st.get("protected_regions") or {}) if match_any(p, ign))
     if t:
         for p, h in sorted((t.get("locked") or {}).items()):
+            if p in checked:
+                continue
             checked.add(p)
             cur = file_sha(repo.root / p)
             if cur != h:
@@ -1287,9 +1709,45 @@ def run_guard(repo, st, cfg, t, cur_tree):
         diff = "\n".join(difflib.unified_diff(old.splitlines(), new.splitlines(), lineterm="", n=0))
         for issue in weakening_issues(p, parse_hunks(diff), old, new, strict=True):
             found.append(viol("PROTECTED TEST CHANGED", p, issue, info["task"]))
+    # Tests inside source files (Rust): locked by this task or protected by an earlier one. Like protected files,
+    # new tests may be added; existing lines may not change.
+    regions = {}
+    for p, info in sorted((st.get("protected_regions") or {}).items()):
+        regions[p] = (info["sha"], "PROTECTED TESTS CHANGED", info["task"])
+    if t:
+        for p, h in sorted((t.get("locked_regions") or {}).items()):
+            regions[p] = (h, "LOCKED TESTS CHANGED", t["id"])
+    for p, (h, kind, owner) in sorted(regions.items()):
+        if p in checked:
+            continue
+        checked.add(p)
+        text = read_text(repo.root / p)
+        cur = test_region_text(p, text)
+        if text is not None and sha256_text(cur) == h:
+            continue
+        if text is None or not cur:
+            found.append(viol(kind.replace("CHANGED", "DELETED"), p, "", owner))
+            continue
+        old = read_text(protected_copy_path(repo, h))
+        if old is None:
+            found.append(viol(kind, p, "", owner))
+            continue
+        diff = "\n".join(difflib.unified_diff(old.splitlines(), cur.splitlines(), lineterm="", n=0))
+        for issue in weakening_issues(p, parse_hunks(diff), strict=True):
+            found.append(viol(kind, p, issue, owner))
     if t and t.get("start_tree") and cur_tree:
         for status, p in tree_changes(repo, t["start_tree"], cur_tree):
-            if p in checked or not is_test(p, cfg):
+            if p in checked:
+                continue
+            if status == "M" and has_inline_tests(p) and not is_test(p, cfg):
+                old_r = test_region_text(p, blob_text(repo, t["start_tree"], p))
+                new_r = test_region_text(p, read_text(repo.root / p))
+                if old_r and old_r != new_r:
+                    diff = "\n".join(difflib.unified_diff(old_r.splitlines(), new_r.splitlines(), lineterm="", n=0))
+                    for issue in weakening_issues(p, parse_hunks(diff)):
+                        found.append(viol("EXISTING TEST WEAKENED", p, issue))
+                continue
+            if not is_test(p, cfg):
                 continue
             if status == "D":
                 found.append(viol("EXISTING TEST FILE DELETED", p))
@@ -1435,24 +1893,64 @@ def doc_refs(store, tree, files):
             "hits": set()}
     if docs:
         refs["hits"] = doc_mentions(" ".join(pytest_ini(store.repo.root).get("addopts") or []), refs)
+        doc_set = set(docs)
         named = set(_norm_target(w) for c in cmds for w in verify_tokens(c))
-        readers = set(p for p in files if p not in docs and p.rsplit("/", 1)[-1] != "setup.py" and (
-            SRC_EXT_RE.search(p) or is_test(p, cfg) or BUILD_FILE_RE.search(p) or p in named))
-        # `git grep` finds the few files that mention any document at all; only those are read and parsed.
-        pf = store.repo.dir / ("needles.%d" % os.getpid())
+
+        def reader(p):
+            return p not in doc_set and p.rsplit("/", 1)[-1] != "setup.py" and bool(
+                SRC_EXT_RE.search(p) or is_test(p, cfg) or BUILD_FILE_RE.search(p) or p in named)
+        for mentions in mentions_by_file(store, tree, files, refs, reader, key[1]).values():
+            refs["hits"].update(mentions)
+    _REFS_MEMO[key] = refs
+    return refs
+
+
+def mentions_by_file(store, tree, files, refs, reader, salt):
+    """{path: [document names and extensions it mentions]} for the files of `tree` that `reader` accepts and that
+    mention any. Kept in .sci/mentions.json for the last tree, so after an edit only the changed files are read:
+    on a large repository a full scan (git grep, then parsing every file that matches) takes seconds."""
+    repo = store.repo
+    needles = sorted(refs["names"] | refs["exts"])
+    key = sha256_text(json.dumps([VERSION, needles, salt]))[:16]
+    path = repo.dir / "mentions.json"
+    try:
+        cache = json.loads(read_text(path) or "{}")
+    except ValueError:
+        cache = {}
+    old_tree, hits = cache.get("tree"), cache.get("hits") or {}
+    todo = None
+    if cache.get("key") == key and old_tree:
         try:
-            atomic_write(pf, "\n".join(sorted(names | refs["exts"])) + "\n", sync=False)
-            g = git(store.repo.root, ["grep", "-I", "-l", "-i", "-F", "-z", "-f", str(pf), tree], check=False)
+            changed = tree_changes(repo, old_tree, tree)
+        except Refuse:
+            changed = None
+        if changed is not None and len(changed) <= 2000:
+            for _, p in changed:
+                hits.pop(p, None)
+            todo = [p for _, p in changed if p in files and reader(p)]
+    if todo is None:
+        # `git grep` finds the few files that mention any document at all; only those are read and parsed.
+        hits = {}
+        pf = repo.dir / ("needles.%d" % os.getpid())
+        try:
+            atomic_write(pf, "\n".join(needles) + "\n", sync=False)
+            g = git(repo.root, ["grep", "-I", "-l", "-i", "-F", "-z", "-f", str(pf), tree], check=False)
         finally:
             with contextlib.suppress(OSError):
                 pf.unlink()
-        found = [p for p in (rec.split(":", 1)[-1] for rec in g.stdout.split("\0") if rec) if p in readers]
-        blobs = cat_blobs(store.repo, [files[p][1] for p in found])
-        for p in found:
-            text = blobs.get(files[p][1]) or ""
-            refs["hits"] |= doc_mentions(py_strings(text) if p.endswith(".py") else text, refs)
-    _REFS_MEMO[key] = refs
-    return refs
+        todo = [p for p in (rec.split(":", 1)[-1] for rec in g.stdout.split("\0") if rec) if p in files and reader(p)]
+    blobs = cat_blobs(repo, [files[p][1] for p in todo])
+    for p in todo:
+        text = blobs.get(files[p][1]) or ""
+        low = text.lower()
+        if not any(n in low for n in needles):
+            continue
+        found = doc_mentions(py_strings(text) if p.endswith(".py") else text, refs)
+        if found:
+            hits[p] = sorted(found)
+    with contextlib.suppress(OSError):
+        atomic_write(path, json.dumps({"key": key, "tree": tree, "hits": hits}), sync=False)
+    return hits
 
 
 def inert_docs(store, tree, files, cmds=None):
@@ -1525,8 +2023,11 @@ def code_fp(store, tree, cmds=None):
 
 
 def step_fp(store, tree, cmd):
-    """Fingerprint for reusing one step's PASS: only documents that this command (or the build) reads count."""
-    return code_fp(store, tree, [cmd, store.cfg.get("build_cmd") or ""])
+    """Fingerprint for reusing one step's PASS: only documents that this command (or the build) reads count. A
+    different build command makes different binaries, so it is part of the fingerprint."""
+    build = (store.cfg.get("build_cmd") or "").strip()
+    fp = code_fp(store, tree, [cmd, build])
+    return sha256_text(fp + "\0" + build) if build else fp
 
 
 def cacheable(cmd):
@@ -1834,7 +2335,9 @@ def narrow_suite(cmd, failing, files):
     from the repo root), or None when sci cannot build one that selects exactly those tests."""
     spec = parse_test_cmd(cmd)
     toks = cmd_words(cmd)
-    if not spec or spec["unknown"] or not failing or len(failing) > 40:
+    if not spec:
+        return narrow_cargo(cmd, failing)
+    if spec["unknown"] or not failing or len(failing) > 40:
         return None
     if spec["kind"] == "pytest":
         if not all("::" in f and f.split("::", 1)[0] in files for f in failing):
@@ -1854,6 +2357,23 @@ def narrow_suite(cmd, failing, files):
     return " ".join(shlex.quote(w) for w in head + list(failing))
 
 
+def narrow_cargo(cmd, failing):
+    """`cargo test ... -- --exact <ids>`: reruns only the failing tests of a cargo test suite (every target, each
+    running just the tests with those exact names), or None."""
+    words = cmd_words(cmd) or []
+    prog, rest = _runner_word(words)
+    if prog != "cargo" or rest[:1] != ["test"] or not failing or len(failing) > 40:
+        return None
+    if not all(re.match(r"^[A-Za-z_][\w:]*$", f) for f in failing):
+        return None  # doc tests ("src/lib.rs - add (line 3)") cannot be selected exactly
+    cut = words.index("--") if "--" in words else len(words)
+    head, tail = words[:cut], words[cut + 1:]
+    if "--no-fail-fast" not in head:
+        head.append("--no-fail-fast")
+    tail = [w for w in tail if w != "--exact"] + ["--exact"]
+    return " ".join(shlex.quote(w) for w in head + ["--"] + tail + list(failing))
+
+
 # Test runners whose checks are usually the suite's command plus a selection, as in `cargo test` and
 # `cargo test energy`. Only selections that cannot reach a test the suite leaves out are listed: cargo's --test
 # and --lib can run a target that has `test = false`, and Maven's -Dtest overrides the suite's excludes.
@@ -1864,7 +2384,7 @@ def narrow_suite(cmd, failing, files):
 # skip: flags that leave tests out of a suite.
 RUNNERS = [
     {"start": [["cargo", "test"]], "value": set(), "flags": {"--", "--exact"}, "words": "filter",
-     "quiet": {"-q", "--quiet", "-v", "--verbose", "--nocapture", "--show-output"}, "quietv": set(),
+     "quiet": {"-q", "--quiet", "-v", "--verbose", "--nocapture", "--show-output", "--no-fail-fast"}, "quietv": set(),
      "skip": {"--exclude", "--skip"}},
     {"start": [["go", "test"]], "value": {"-run"}, "flags": set(), "words": "package",
      "quiet": {"-v", "-count", "-json"}, "quietv": set(), "skip": {"-skip"}},
@@ -1944,9 +2464,9 @@ def go_covers(patterns, pkg, files):
 def runner_covers(suite_cmd, cmd, known, files=()):
     """The selection of check `cmd` (test-name filters, paths, packages) when the suite surely runs every test it
     runs: the same runner with the same options, a suite that selects nothing and a check that only narrows it.
-    None otherwise, and whenever the baseline has failures, because a runner may stop at a failing target and
-    never run the tests after it."""
-    if known:
+    None otherwise, and when the baseline has failures and the suite stops at a failing target (it might never
+    run the tests after it)."""
+    if known and stops_early(suite_cmd):
         return None
     ts, tt = cmd_words(suite_cmd), cmd_words(cmd)
     if not ts or not tt:
@@ -2001,7 +2521,11 @@ def compute_next(st, cfg, live_tree=None, live_ok=None, job=None):
     t = active_task(st)
     if t:
         if t.get("stop"):
-            if t.get("stop_cycles", 0) >= 1:
+            if int(t.get("resets") or 0) >= 2:
+                return ("ESCALATE: %s still fails after %d fresh starts. Stop and ask the human: `.sci/sci task block %s "
+                        "--reason \"<what you tried and what blocks you>\"`, then continue with another task."
+                        % (t["id"], t["resets"], t["id"]))
+            if t.get("stop_cycles", 0) >= 1 or int(t.get("strikes") or 0) >= 6:
                 return ("ESCALATE: %s failed 6+ fix attempts. Run `.sci/sci restore --to start`, write down a different "
                         "approach (.sci/sci note --kind decision), or `.sci/sci task block %s --reason \"<question>\"` and ask "
                         "the human." % (t["id"], t["id"]))
@@ -2128,6 +2652,7 @@ def render_handoff(st, cfg):
               "- Scope: " + (", ".join(t["scope"]) or "(none)"),
               "- Invariants: " + ("; ".join(t["invariants"]) or "(none)"),
               "- Locked: " + lock_desc(t),
+              "- Unlocked for this task: " + (", ".join(t.get("unlocked") or []) or "(none)"),
               "- Last check: %s; strikes %d/3" % (check_state(t), t.get("strikes", 0))]
         if st.get("now") and st["now"].get("task") == t["id"]:
             L.append("- Doing: " + st["now"]["text"])
@@ -2282,7 +2807,15 @@ def detect_toolchain(root):
         notes.append("Python project detected -> %s" % cmd)
     alts = []
     if has("Cargo.toml"):
-        alts.append("cargo test -q")
+        # Every test target runs even after one fails, so a known failure cannot hide a new one.
+        nextest = has(".config/nextest.toml") and shutil.which("cargo-nextest")
+        alts.append("cargo nextest run --no-fail-fast" if nextest else "cargo test --no-fail-fast -q")
+        pyproject = read_text(root / "pyproject.toml") or ""
+        if re.search(r"maturin|setuptools[-_]rust|pyo3", pyproject, re.I):
+            notes.append("Rust extension for Python (%s). Python tests import the built module, so set a rebuild "
+                         "command: .sci/sci config set build_cmd \"maturin develop\" (or \"pip install -e .\"); "
+                         "cargo tests run with: cargo test --no-fail-fast -q"
+                         % ("maturin" if "maturin" in pyproject.lower() else "setuptools-rust/PyO3"))
     if has("go.mod"):
         alts.append("go test ./...")
     if has("Project.toml"):
@@ -2298,7 +2831,9 @@ def detect_toolchain(root):
     if pkg.exists():
         try:
             if json.loads(read_text(pkg) or "{}").get("scripts", {}).get("test"):
-                alts.append("npm test --silent")
+                pm = ("pnpm" if has("pnpm-lock.yaml") else "yarn" if has("yarn.lock") else
+                      "bun" if has("bun.lockb", "bun.lock") else "npm")
+                alts.append("%s test%s" % (pm, " --silent" if pm == "npm" else ""))
         except ValueError:
             pass
     if has("DESCRIPTION") and (root / "tests").is_dir():
@@ -2309,7 +2844,7 @@ def detect_toolchain(root):
         notes.append("Other runners seen: " + " | ".join(alts))
     compiled = []
     for pat in ("*.pyx", "*.f90", "*.F90", "*.f", "*.c", "*.cpp", "*.cu"):
-        out = git(root, ["ls-files", "--", pat, "**/" + pat], check=False).stdout.split()
+        out = [x for x in git(root, ["ls-files", "-z", "--", pat, "**/" + pat], check=False).stdout.split("\0") if x]
         if out:
             compiled.append("%d %s" % (len(out), pat))
     if compiled and pyproj:
@@ -2386,8 +2921,11 @@ def def_patterns(sym):
         re.compile(r"^\s*(?:(?:pure|elemental|recursive|impure|module)\s+)*(?:subroutine|function|module|program|"
                    r"type|interface)\s*(?:,[^:]*::)?\s*%s\b" % s, re.I),
         re.compile(r"^\s*(?:[\w()*,=\s]+\s)?function\s+%s\b" % s, re.I),
-        re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(?:fn|struct|enum|trait|type|mod|"
-                   r"const|static)\s+%s\b" % s),
+        re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:default\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?"
+                   r"(?:extern\s+\"[^\"]*\"\s+)?(?:fn|struct|enum|trait|type|mod|const|static|union)\s+%s\b" % s),
+        re.compile(r"^\s*(?:unsafe\s+)?impl\b(?:\s*<[^>]*>)?\s+(?:[\w:<>,&' ]+\s+for\s+)?%s\b" % s),
+        re.compile(r"^\s*macro_rules!\s*%s\b" % s),
+        re.compile(r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\*?\s+%s\b" % s),
         re.compile(r"^\s*func\s+(?:\([^)]*\)\s*)?%s\b" % s),
         re.compile(r"^\s*(?:export\s+)?(?:default\s+)?(?:const|let|var|class|interface|type)\s+%s\b" % s),
         re.compile(r"^\s*(?:mutable\s+struct|struct|abstract\s+type|primitive\s+type|macro|module)\s+%s\b" % s),
@@ -2745,8 +3283,11 @@ def cmd_wait(args):
     if not j:
         print("No background job has run in this repo yet.")
         return 0
-    if j.get("state") == "done" and int(job_seen(repo, n).get("pos") or 0) >= os.path.getsize(
-            str(job_path(repo, n, "out"))):
+    try:
+        out_size = os.path.getsize(str(job_path(repo, n, "out")))
+    except OSError:
+        out_size = 0
+    if j.get("state") == "done" and int(job_seen(repo, n).get("pos") or 0) >= out_size:
         rc = int(j["rc"]) if isinstance(j.get("rc"), int) else 1
         print("Job %d (%s) already finished (exit %d) and its output was shown. Its last lines:" % (
             n, j.get("label") or "?", rc))
@@ -3071,6 +3612,8 @@ def cmd_resume(args):
         if t["invariants"]:
             L.append("  invariants: " + "; ".join(t["invariants"]))
         L.append("  locked: " + lock_desc(t))
+        if t.get("unlocked"):
+            L.append("  unlocked for this task (the human reviews them): " + ", ".join(t["unlocked"]))
         lv = "never"
         if t.get("verified_tree"):
             lv = ("on current files" if live_tree == t["verified_tree"] else
@@ -3235,7 +3778,8 @@ def cmd_task_start(args):
         t.update({"status": "active", "started": now_iso(), "start_tree": tree, "start_head": head_sha(repo),
                   "preexisting_untracked": untracked_list(repo, cfg), "strikes": 0, "stop": None, "stop_cycles": 0,
                   "last_check": None, "verified_tree": None, "verified_full": False, "last_green_tree": None,
-                  "locked": {}, "lock_none": None, "red": False, "pending": None})
+                  "locked": {}, "lock_none": None, "unlocked": [], "locked_regions": {}, "red": False,
+                  "pending": None})
         st["active"] = t["id"]
         st["violations"] = []
         set_ref(repo, t["id"] + "/start", tree, "sci %s start" % t["id"])
@@ -3384,7 +3928,7 @@ def cmd_task_scope(args):
 
 SRC_EXT_RE = re.compile(r"\.(?:py|pyx|jl|[rR]|m|sh|bash|c|cc|cpp|cxx|h|hpp|cu|f|for|f90|F90|f95|rs|go|js|mjs|cjs|"
                         r"jsx|ts|tsx|mts|cts|vue|svelte|java|kt|kts|scala|cs|fs|swift|dart|php|ex|exs|hs|ml|zig|rb|"
-                        r"pl|lua|ipynb)$")
+                        r"pl|lua|ipynb|bats|ps1|groovy|clj|cljs|erl|nim|cr)$")
 RUNNER_RE = re.compile(r"(?:^|[\s;&|(/])(?:pytest|py\.test|unittest|nose2|nosetests|tox|nox|ctest|jest|vitest|mocha|"
                        r"rspec|phpunit|runtests|testthat|go\s+test|cargo\s+(?:test|nextest)|make\s+(?:test|check)|"
                        r"(?:npm|yarn|pnpm)\s+(?:run\s+)?test|meson\s+test|dotnet\s+test|mvnw?\s+test|gradlew?\s+test|"
@@ -3452,12 +3996,56 @@ def lock_candidates(repo, cfg, t, cur_tree):
         elif re.match(r"^[\w.+-]+(?:/[\w.+-]+)+$", rel) or (re.match(r"^[\w.+-]+$", rel) and SRC_EXT_RE.search(rel)):
             missing.append(rel)
     cands += [c for c in changed if is_test(c, cfg)]
+    cands += rust_lock_candidates(repo, cfg, t, changed)
     seen, res = set(), []
     for c in cands:
         if c not in seen and (repo.root / c).is_file():
             seen.add(c)
             res.append(c)
     return res, missing
+
+
+def region_lockable(repo, cfg, p):
+    """Whether `p` is source code with tests inside (Rust): lock its tests, not the whole file."""
+    return has_inline_tests(p) and not is_test(p, cfg) and bool(test_region_text(p, read_text(repo.root / p)))
+
+
+def rust_lock_candidates(repo, cfg, t, changed):
+    """Rust files whose tests define a task's acceptance: source files whose inline tests changed in this task,
+    integration tests named by `cargo test --test NAME`, and the module files a test-name filter names
+    (`cargo test parser::tests::roundtrip` -> src/parser.rs or src/parser/mod.rs)."""
+    words = cmd_words(t.get("verify") or "") or []
+    prog, rest = _runner_word(words)
+    res = []
+    for p in changed:
+        if has_inline_tests(p) and not is_test(p, cfg):
+            old = test_region_text(p, blob_text(repo, t["start_tree"], p)) if t.get("start_tree") else ""
+            if test_region_text(p, read_text(repo.root / p)) not in ("", old):
+                res.append(p)
+    if prog != "cargo" or rest[:1] not in (["test"], ["nextest"]):
+        return res
+    files = [x for x in tracked_set(repo) | set(changed) if x.endswith(".rs")]
+    filters, i = [], 1
+    while i < len(rest):
+        w = rest[i]
+        if w in ("--test", "--bin", "--example", "--bench", "-p", "--package", "--features", "-F", "--manifest-path",
+                 "-j", "--jobs", "--target", "--profile", "--exclude", "--skip") and i + 1 < len(rest):
+            if w == "--test":
+                res += [f for f in files if re.search(r"(?:^|/)tests/%s(?:\.rs|/main\.rs)$" % re.escape(rest[i + 1]), f)]
+            i += 2
+            continue
+        if not w.startswith("-"):
+            filters.append(w)
+        i += 1
+    for f in filters:
+        parts = [x for x in f.split("::") if x]
+        mods = parts[:parts.index("tests")] if "tests" in parts else parts[:-1]
+        if not mods:
+            continue
+        tail = "/".join(mods)
+        res += [x for x in files if x.endswith("/" + tail + ".rs") or x.endswith("/" + tail + "/mod.rs")
+                or (x in ("src/%s.rs" % tail, "src/%s/mod.rs" % tail))]
+    return res
 
 
 def cmd_lock(args):
@@ -3488,9 +4076,18 @@ def cmd_lock(args):
         for p in paths:
             if not (repo.root / p).is_file():
                 refuse("Not a file: %s" % p)
-            t["locked"][p] = file_sha(repo.root / p)
-            store_protected_copy(repo, repo.root / p, t["locked"][p])
-        if none_reason and not t["locked"]:
+            if region_lockable(repo, cfg, p):
+                region = test_region_text(p, read_text(repo.root / p))
+                t["locked_regions"][p] = sha256_text(region)
+                store_protected_text(repo, region)
+            else:
+                t["locked"][p] = file_sha(repo.root / p)
+                store_protected_copy(repo, repo.root / p, t["locked"][p])
+            if p in t["unlocked"]:
+                t["unlocked"].remove(p)
+        if paths:
+            t["lock_none"] = None
+        if none_reason and not (t["locked"] or t["locked_regions"]):
             t["lock_none"] = none_reason
             add_review(st, t["id"], "no-lock", "nothing locked (%s); acceptance rests on `%s` alone"
                        % (none_reason, t["verify"]))
@@ -3505,8 +4102,11 @@ def cmd_lock(args):
             print("Files in the task scope (%s) are what the task changes, so they are never locked."
                   % trunc(", ".join(t["scope"]), 80))
     else:
-        print("Locked for %s: %s" % (t["id"], ", ".join(paths)))
-        print("Do not edit locked files. Implement in small steps and run `.sci/sci check` after each.")
+        print("Locked for %s: %s" % (t["id"], lock_desc(t)))
+        if t["locked_regions"]:
+            print("In %s only the tests (#[cfg(test)] modules, #[test] functions) are locked; edit the code around "
+                  "them freely. New tests may be added." % ", ".join(sorted(t["locked_regions"])))
+        print("Do not edit locked tests. Implement in small steps and run `.sci/sci check` after each.")
     if not t["red"]:
         print("  note: no failing check was seen before locking. For a behavior change the new test should FAIL "
               "first (RED); for a refactor PASS is expected.")
@@ -3525,25 +4125,49 @@ def cmd_unlock(args):
         paths = [norm_rel(repo.root, p) for p in args.paths] if args.paths else (sorted(t["locked"]) if t else [])
         if not paths:
             refuse("Nothing to unlock.", ".sci/sci unlock <file> --reason \"...\"")
-        done_paths = []
+        done_paths, relock = [], []
         for p in paths:
             cur = file_sha(repo.root / p)
-            if t and p in t.get("locked", {}):
-                del t["locked"][p]
-            if p in st["protected"] and cur:
-                st["protected"][p]["sha"] = cur
-                store_protected_copy(repo, repo.root / p, cur)
-            if cur:
-                st["acks"][p] = cur
+            if t:
+                # Open for this task, before or after the edit: the guard skips the file until `done`, which then
+                # guards whatever the file holds.
+                if p in t.get("locked", {}):
+                    del t["locked"][p]
+                    relock.append(p)
+                for k in ("locked_regions",):
+                    if p in (t.get(k) or {}):
+                        del t[k][p]
+                        relock.append(p)
+                if p not in t["unlocked"]:
+                    t["unlocked"].append(p)
+            else:
+                # No task is active: accept the file as it is now.
+                if p in st["protected"] and cur:
+                    st["protected"][p]["sha"] = cur
+                    store_protected_copy(repo, repo.root / p, cur)
+                if cur:
+                    st["acks"][p] = cur
             done_paths.append(p)
         add_review(st, t["id"] if t else None, "test-change", "%s: %s" % (", ".join(done_paths), args.reason))
         st["violations"] = []
         store.log("UNLOCK", task=t["id"] if t else None, msg=args.reason, paths=done_paths)
         store.save()
     print("Unlocked: %s (flagged for human review)." % ", ".join(done_paths))
-    print("After fixing the test, lock it again: .sci/sci lock %s" % " ".join(done_paths))
+    if t:
+        print("Change %s as %s needs; checks accept its changes until `done`, which guards the new version."
+              % ("them" if len(done_paths) > 1 else "it", t["id"]))
+    if relock:
+        print("It held this task's acceptance tests: when they are right, lock them again: .sci/sci lock %s"
+              % " ".join(sorted(set(relock))))
     footer(store)
     return 0
+
+
+def store_protected_text(repo, text):
+    dst = protected_copy_path(repo, sha256_text(text))
+    if not dst.exists():
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write(dst, text, sync=False)
 
 
 def store_protected_copy(repo, src, sha):
@@ -3558,7 +4182,11 @@ def build_needed(store, cur_tree):
     repo, st, cfg = store.repo, store.st, store.cfg
     cmd = (cfg.get("build_cmd") or "").strip()
     last = st.get("last_build_tree")
-    if not cmd or last == cur_tree:
+    if not cmd:
+        return None
+    if st.get("last_build_cmd") not in (None, cmd):
+        return cmd  # a different build (new flags, another target): its output is not what was tested
+    if last == cur_tree:
         return None
     if last and not any(match_any(p, cfg.get("build_globs")) for _, p in tree_changes(repo, last, cur_tree)):
         return None
@@ -3625,15 +4253,59 @@ def scope_warnings(store, t, cur_tree):
     return w
 
 
-def edited_during(repo, cfg, tree):
-    """Code that existed when a command started and was edited or deleted while it ran: tracked files and untracked
-    source files. New files, documentation and untracked data files (output the command rewrites) do not count."""
+def run_changes(repo, cfg, tree):
+    """What changed while a command ran, from snapshot `tree`: (edited, outputs). edited: code that existed when it
+    started and was edited or deleted meanwhile (tracked files and untracked source files; new files and
+    documentation do not count). outputs: untracked files other than source code and test snapshots that the
+    command created or rewrote (logs, reports, artifacts)."""
     after, _ = snapshot(repo, cfg)
     if after == tree:
-        return []
+        return [], []
     tracked = tracked_set(repo)
-    return [p for s, p in tree_changes(repo, tree, after) if s != "A" and not is_doc(p, cfg)
-            and (p in tracked or SRC_EXT_RE.search(p))]
+    edited, outputs = [], []
+    for s, p in tree_changes(repo, tree, after):
+        if p in tracked or SRC_EXT_RE.search(p):
+            if s != "A" and not is_doc(p, cfg):
+                edited.append(p)
+        elif s != "D" and not SNAPSHOT_RE.search(p) and (s != "A" or not is_test(p, cfg)):
+            # A new file in a test directory may be an expected-output file the test writes once; it counts as
+            # output only when a later run rewrites it.
+            outputs.append(p)
+    return edited, outputs
+
+
+def ignore_outputs(store, t, outputs):
+    """Ignore from now on the untracked files a check wrote, unless the task's scope names them. Otherwise every run
+    changes the files sci compares, `done` never sees the files it verified, and the files get committed. Returns
+    the globs added to ignore_globs."""
+    cfg = store.cfg
+    scope = (t or {}).get("scope") or []
+    new = [p for p in outputs if not match_any(p, scope)]
+    by_dir = {}
+    for p in new:
+        by_dir.setdefault(p.rsplit("/", 1)[0] if "/" in p else "", []).append(p)
+    pats = []
+    for d, ps in sorted(by_dir.items()):
+        if d and len(ps) >= 5 and not any(x.strip("./").startswith(d) for x in scope):
+            pats.append(d + "/**")
+        else:
+            pats += sorted(ps)
+    cur = list(cfg.get("ignore_globs") or [])
+    add = [x for x in pats if x not in cur][:50]
+    if add:
+        cfg["ignore_globs"] = cur + add
+        st = store.st
+        for p in [q for q in (st.get("protected") or {}) if match_any(q, add)]:
+            del st["protected"][p]
+        for p in [q for q in ((t or {}).get("locked") or {}) if match_any(q, add)]:
+            del t["locked"][p]
+    return add
+
+
+def ignored_text(add):
+    return ("note: the command wrote %s (untracked, not source code); sci ignores %s from now on, so it is never "
+            "compared or committed. Undo: .sci/sci config remove ignore_globs %s"
+            % (", ".join(add[:4]), "it" if len(add) == 1 else "them", add[0]))
 
 
 def edited_text(what, paths):
@@ -3650,7 +4322,7 @@ def cmd_check(args):
         t = require_active(st)
         tid, cmd = t["id"], args.cmd or t["verify"]
         cur_tree, big = snapshot(repo, cfg)
-        fp, cmd_fp = code_fp(store, cur_tree), step_fp(store, cur_tree, cmd)
+        cmd_fp = step_fp(store, cur_tree, cmd)
         env = env_stamp(repo.root, cmd)
         viol = run_guard(repo, st, cfg, t, cur_tree)
         build = build_needed(store, cur_tree)
@@ -3676,14 +4348,15 @@ def cmd_check(args):
             job_step(pend["label"], 2, 2, (st.get("durations") or {}).get(pend["key"]))
             p_ok, plines, p_last, p_secs, p_whole = run_pending(store, pend, tid)
             lines += plines
-    edited = edited_during(repo, cfg, ref) if r is not None else []
+    edited, outs = run_changes(repo, cfg, ref) if r is not None else ([], [])
     with state_lock(repo):
         st, cfg = store.load()
         t = need_task(st, tid)
+        ignored = ignore_outputs(store, t, outs)
         if built is not None:
             note_result(st, "build:" + build, None, built.ok, built.secs)
             if built.ok:
-                st["last_build_tree"] = cur_tree
+                st["last_build_tree"], st["last_build_cmd"] = cur_tree, build
         if r is not None and not edited:
             note_result(st, "cmd:" + cmd, cmd_fp, r.ok, r.secs, env)
         if p_ok is not None and not edited:
@@ -3719,6 +4392,8 @@ def cmd_check(args):
         print("GUARD FIX: " + guard_fix_hint(viol))
     for w in warn:
         print("WARNING: " + w)
+    if ignored:
+        print(ignored_text(ignored))
     if not is_locked(t) and r is not None:
         print("Not locked yet: when the acceptance test is right, run `.sci/sci lock`.")
     if t.get("stop"):
@@ -3769,6 +4444,109 @@ def verify_plan(store, t, tree, args):
     return steps, covered
 
 
+def crashed(rc):
+    """The exit code of a process killed by a signal (bash reports 128+n) or of a crash on Windows."""
+    return rc < 0 or 128 < rc < 160 or rc > 255
+
+
+STOP_RUNNERS = {"jest": {"--bail", "-b"}, "vitest": {"--bail"}, "mocha": {"--bail", "-b"}, "rspec": {"--fail-fast"},
+                "go": {"-failfast", "-failfast=true"}, "ctest": {"--stop-on-failure"}, "phpunit": {"--stop-on-failure",
+                "--stop-on-error", "--stop-on-defect"}}
+
+
+def _runner_word(words):
+    """The test runner a command starts (through npx, yarn, pnpm, bunx, uv run ...), or None."""
+    w = [x for x in words or () if not re.match(r"^\w+=", x)]
+    while w and w[0].rsplit("/", 1)[-1] in ("npx", "bunx", "yarn", "pnpm", "uv", "poetry", "pipenv", "pdm", "rye",
+                                             "hatch", "pixi", "exec", "run", "bundle", "env"):
+        w = w[1:]
+    return (w[0].rsplit("/", 1)[-1].lower(), w[1:]) if w else (None, [])
+
+
+def stops_early(cmd):
+    """Whether suite `cmd` stops at its first failing test, file or target, so tests after a known failure never
+    run and a new failure among them would go unseen."""
+    spec = parse_test_cmd(cmd)
+    if spec:
+        return spec["stop"]
+    words = cmd_words(cmd) or []
+    prog, rest = _runner_word(words)
+    if prog == "cargo" and rest[:1] in (["test"], ["nextest"]):
+        if "--no-fail-fast" in rest:
+            return False
+        one_target = rest[:1] == ["test"] and any(a in ("--lib", "--doc", "--test", "--bin", "--example", "--bench")
+                                                  or a.startswith(("--test=", "--bin=")) for a in rest)
+        return not one_target
+    if prog in ("mvn", "mvnw", "./mvnw"):
+        return not any(a in ("-fae", "--fail-at-end", "-fn", "--fail-never") for a in rest)
+    if prog in ("gradle", "gradlew", "./gradlew", "gradlew.bat"):
+        return "--continue" not in rest
+    flags = STOP_RUNNERS.get(prog)
+    if flags is not None:
+        return any(a.split("=", 1)[0] in flags or a in flags for a in rest)
+    return False
+
+
+def no_stop_variant(cmd):
+    """`cmd` changed to run every test after a failure, or None when sci cannot build that."""
+    if not stops_early(cmd):
+        return None
+    words = cmd_words(cmd) or []
+    spec = parse_test_cmd(cmd)
+    out, skip = [], False
+    if spec:
+        drop = ("-x", "--exitfirst", "--sw", "--stepwise") if spec["kind"] == "pytest" else ("-f", "--failfast")
+        for w in words:
+            if skip:
+                skip = False
+                continue
+            if w in drop or w.startswith("--maxfail="):
+                continue
+            if w == "--maxfail" and spec["kind"] == "pytest":
+                skip = True
+                continue
+            out.append(w)
+    else:
+        prog, rest = _runner_word(words)
+        if prog == "cargo" and rest[:1] in (["test"], ["nextest"]):
+            cut = words.index("--") if "--" in words else len(words)
+            out = words[:cut] + ["--no-fail-fast"] + words[cut:]
+        elif prog in ("mvn", "mvnw", "./mvnw"):
+            out = words + ["--fail-at-end"]
+        elif prog in ("gradle", "gradlew", "./gradlew", "gradlew.bat"):
+            out = words + ["--continue"]
+        elif prog in STOP_RUNNERS:
+            out = [w for w in words if w.split("=", 1)[0] not in STOP_RUNNERS[prog]]
+        else:
+            return None
+    res = " ".join(shlex.quote(w) for w in out)
+    return res if res != " ".join(shlex.quote(w) for w in words) and not stops_early(res) else None
+
+
+def suite_doubts(st, r):
+    """Why a failing suite run whose named failures are all known baseline failures still does not pass."""
+    b = st.get("baseline") or {}
+    why = []
+    if crashed(r.rc):
+        why.append("the suite was killed (exit %d), so the tests after that point never ran" % r.rc)
+    if stops_early(r.cmd):
+        why.append("the suite stops at its first failure, so the tests after a known failure never ran")
+    n0, n = b.get("failed_n"), failure_count(r.lines)
+    if b.get("summary") and not r.summary:
+        why.append("the suite ended without its summary line (it aborted or crashed)")
+    elif n0 is not None and n is not None and n > n0:
+        why.append("%d tests fail now, %d in the baseline: the runner names files or suites, not each test, so "
+                   "new failures hide behind the known ones" % (n, n0))
+    return why
+
+
+def gate_sig(st, cfg):
+    """What a full verify checks besides the tasks' own commands: suite, build, goldens and baseline."""
+    gold = sorted((k, g.get("cmd"), g.get("rtol"), g.get("atol"), g.get("n")) for k, g in (st.get("goldens") or {}).items())
+    return sha256_text(json.dumps([cfg.get("regress_cmd"), cfg.get("build_cmd"), gold,
+                                   sorted((st.get("baseline") or {}).get("failures") or [])]))[:16]
+
+
 def judge_suite(store, r, covered):
     """(ok, lines) for a regression-suite run: known baseline failures pass, new ones fail and are traced back to
     the earlier task whose tests they are."""
@@ -3777,11 +4555,22 @@ def judge_suite(store, r, covered):
         return True, report_run(repo, cfg, r, "regression suite", quiet_pass=True)[:1]
     known = set((st.get("baseline") or {}).get("failures") or [])
     new = [f for f in r.failing if f not in known]
-    if r.failing and not new and st.get("baseline") and not r.timed_out:
+    doubts = suite_doubts(st, r) if r.failing and not new and st.get("baseline") and not r.timed_out else []
+    if r.failing and not new and st.get("baseline") and not r.timed_out and not doubts:
         return True, ["PASS regression suite: only the %d known pre-existing failures (baseline) | log %s"
                       % (len(r.failing), repo.rel(r.log))]
     lines = report_run(repo, cfg, r, "regression suite")
-    if new:
+    if doubts:
+        lines.append("NOT ONLY KNOWN FAILURES: the failing tests it names are all in the baseline, but %s."
+                     % "; and ".join(doubts))
+        variant = no_stop_variant(r.cmd) if stops_early(r.cmd) else None
+        if variant:
+            lines.append("Make the suite run every test: .sci/sci config set regress_cmd \"%s\", then record the "
+                         "baseline again between tasks (.sci/sci baseline)." % variant)
+        else:
+            lines.append("Read the log (.sci/sci out %d --grep \"FAIL|Error|panicked\") and fix what your change "
+                         "broke." % r.n)
+    elif new:
         lines.append("NEW FAILURES (not in baseline): " + ", ".join(new[:12]))
         for tid, fails in blame_tasks(covered, new):
             lines.append("REGRESSION: your change broke %s's tests (%s). Fix the code. Change %s's tests only if "
@@ -3899,15 +4688,18 @@ def cmd_verify(args):
         if not s_ok:
             ok = False
             break
-    edited = edited_during(repo, cfg, ref) if results else []
+    edited, outs = run_changes(repo, cfg, ref) if results else ([], [])
     lines = []
     with state_lock(repo):
         st, cfg = store.load()
         t = find_task(st, tid) if tid else None
+        ignored = ignore_outputs(store, t, outs)
+        if ignored:
+            lines.append(ignored_text(ignored))
         if built is not None:
             note_result(st, "build:" + build, None, built.ok, built.secs)
             if built.ok:
-                st["last_build_tree"] = cur_tree
+                st["last_build_tree"], st["last_build_cmd"] = cur_tree, build
         for s, s_ok, secs in results if not edited else []:
             note_result(st, s["key"], s["fp"], s_ok, secs, s["env"])
         for name, last in glast.items():
@@ -3923,7 +4715,7 @@ def cmd_verify(args):
         if t:
             if ok:
                 t.update({"verified_tree": cur_tree, "verified_fp": fp, "verified_full": not args.quick,
-                          "verified_at": now_iso()})
+                          "verified_at": now_iso(), "verified_sig": gate_sig(st, cfg)})
                 if not args.quick:
                     t["pending"] = None
                 lc = t.get("last_check")
@@ -4037,10 +4829,13 @@ def cmd_done(args):
                 p = git(repo.root, ["commit", "-q", "-m", msg + "\n" + "\n".join(body), "--"] + to_commit,
                         check=False, timeout=900)
                 if p.returncode != 0:
+                    for chunk in chunked(new_untracked, 200):  # leave the user's index as it was
+                        git(repo.root, ["rm", "-q", "--cached", "--ignore-unmatch", "--"] + chunk, check=False)
                     refuse("git commit failed (pre-commit hook?):\n" + trunc((p.stdout + p.stderr)[-1500:], 1500),
                            "Fix what the hook reports, run `.sci/sci verify`, then `.sci/sci done` again.")
                 commit = head_sha(repo)
-                left = git(repo.root, ["diff", "--name-only", "HEAD", "--"] + to_commit, check=False).stdout.split()
+                left = [x for x in git(repo.root, ["diff", "--name-only", "-z", "HEAD", "--"] + to_commit,
+                                       check=False).stdout.split("\0") if x]
                 if left:
                     notes.append("Hooks changed files after commit: %s. Run .sci/sci verify." % ", ".join(left))
             else:
@@ -4053,6 +4848,23 @@ def cmd_done(args):
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(pp), str(dst))
                 notes.append("Not committed (commit disabled). Patch: %s" % repo.rel(dst))
+        # Tests unlocked in this task are guarded again from their final version on; the review item says why.
+        for p in t.get("unlocked") or []:
+            cur = file_sha(repo.root / p)
+            st["acks"].pop(p, None)
+            if p in st["protected"]:
+                if cur:
+                    st["protected"][p] = {"sha": cur, "task": t["id"]}
+                    store_protected_copy(repo, repo.root / p, cur)
+                else:
+                    del st["protected"][p]
+            if p in st["protected_regions"]:
+                region = test_region_text(p, read_text(repo.root / p))
+                if region:
+                    st["protected_regions"][p] = {"sha": sha256_text(region), "task": t["id"]}
+                    store_protected_text(repo, region)
+                else:
+                    del st["protected_regions"][p]
         # Locked files and test files created by this task guard every later task.
         guarded = sorted(set(t.get("locked") or {}) | set(p for s, p in changes if s == "A" and is_test(p, cfg)))
         protected_now = []
@@ -4062,7 +4874,23 @@ def cmd_done(args):
                 st["protected"][p] = {"sha": cur, "task": t["id"]}
                 store_protected_copy(repo, repo.root / p, cur)
                 protected_now.append(p)
+        # Tests inside source files (Rust) that this task locked or wrote guard every later task too.
+        for p in sorted(set(t.get("locked_regions") or {}) | set(
+                p for s, p in changes if s != "D" and has_inline_tests(p) and not is_test(p, cfg))):
+            region = test_region_text(p, read_text(repo.root / p))
+            old = test_region_text(p, blob_text(repo, t["start_tree"], p)) if p not in t.get("locked_regions", {}) else None
+            if region and region != old:
+                st["protected_regions"][p] = {"sha": sha256_text(region), "task": t["id"]}
+                store_protected_text(repo, region)
+                protected_now.append(p + " (tests)")
         t.update({"status": "done", "done_at": now_iso(), "commit": commit, "done_tree": cur_tree})
+        final = (all(x["status"] == "done" for x in st["tasks"]) and t.get("verified_full")
+                 and t.get("verified_sig") == gate_sig(st, cfg))
+        if final:
+            # The last task's full verify ran every task's check, the goldens and the suite on these files: it is
+            # the final verify, and running it again would only reuse every step.
+            st["last_verify"] = {"t": now_iso(), "ok": True, "task": None, "quick": False, "tree": cur_tree,
+                                 "fp": code_fp(store, cur_tree), "by_done": t["id"]}
         st["active"] = None
         st["violations"] = []
         drop_refs(repo, t["id"])
@@ -4090,6 +4918,8 @@ def locked_targets(st, t):
     m = {p: info["sha"] for p, info in (st.get("protected") or {}).items()}
     if t:
         m.update(t.get("locked") or {})
+        for p in t.get("unlocked") or []:
+            m.pop(p, None)
     return m
 
 
@@ -4111,12 +4941,28 @@ def cmd_restore(args):
         # Locked/protected files always go back to their exact locked content.
         lock_fix = [p for p in (paths if paths is not None else sorted(locks))
                     if p in locks and file_sha(repo.root / p) != locks[p]]
-        other = [p for p in paths if p not in locks] if paths is not None else None
+        region_fix = {}
+        if paths is not None:
+            rlocks = {q: info["sha"] for q, info in (st.get("protected_regions") or {}).items()}
+            rlocks.update(t.get("locked_regions") or {})
+            for p in paths:
+                if p in rlocks and p not in (t.get("unlocked") or []):
+                    text, want = read_text(repo.root / p), read_text(protected_copy_path(repo, rlocks[p]))
+                    if text is not None and want is not None and sha256_text(test_region_text(p, text)) != rlocks[p]:
+                        new = splice_regions(p, text, want)
+                        if new is not None:
+                            region_fix[p] = new
+        other = [p for p in paths if p not in locks and p not in region_fix] if paths is not None else None
         changes = []
         if other is None or other:
             changes = [(s_, p) for s_, p in tree_changes(repo, target, cur_tree, other) if p not in locks]
-        if not changes and not lock_fix:
+        if not changes and not lock_fix and not region_fix:
             print("Nothing to restore: files already match the %s state%s." % (to, " for those paths" if paths else ""))
+            if to == "start" and not paths and (t.get("strikes") or t.get("stop")):
+                t.update({"strikes": 0, "stop": None, "resets": int(t.get("resets") or 0) + 1})
+                store.save()
+                print("Strikes reset: this is a fresh start. Write down the new approach before coding: "
+                      ".sci/sci note \"<approach and why the last one failed>\" --kind decision")
             footer(store)
             return 0
         t["attempts"] = int(t.get("attempts") or 0) + 1
@@ -4136,6 +4982,9 @@ def cmd_restore(args):
                 with contextlib.suppress(OSError):
                     d.rmdir()
                 d = d.parent
+        for p, new in sorted(region_fix.items()):
+            with open(str(repo.root / p), "w", encoding="utf-8", newline="") as f:
+                f.write(new)
         unrecoverable = []
         for p in lock_fix:
             src = protected_copy_path(repo, locks[p])
@@ -4146,6 +4995,9 @@ def cmd_restore(args):
                 unrecoverable.append(p)
         st["violations"] = []
         t["verified_tree"] = None
+        fresh = to == "start" and not paths and (t.get("strikes") or t.get("stop"))
+        if fresh:  # back to the start: a new approach, so strikes count from zero (stop_cycles stays)
+            t.update({"strikes": 0, "stop": None, "resets": int(t.get("resets") or 0) + 1})
         store.log("RESTORE", task=t["id"], msg=to, files=len(changes), locked=lock_fix, attempt=n)
         store.save()
     if changes:
@@ -4154,10 +5006,15 @@ def cmd_restore(args):
     fixed = [p for p in lock_fix if p not in unrecoverable]
     if fixed:
         print("Restored locked content: %s" % ", ".join(fixed))
+    if region_fix:
+        print("Restored the locked tests in %s; the code around them is unchanged." % ", ".join(sorted(region_fix)))
     if unrecoverable:
         print("WARNING: no saved locked copy for %s; restore it by hand from git." % ", ".join(unrecoverable))
     if patch:
         print("Your previous version is saved: %s (re-apply: git apply %s)" % (repo.rel(patch), repo.rel(patch)))
+    if fresh:
+        print("Strikes reset: this is a fresh start. Write down the new approach before coding: "
+              ".sci/sci note \"<approach and why the last one failed>\" --kind decision")
     print("Next: run `.sci/sci check` to confirm the state, then try a different approach.")
     footer(store)
     return 0
@@ -4453,6 +5310,10 @@ def cmd_golden(args):
         if zeros and atol == 0.0:
             print("  note: %d of the numbers are exactly 0, and with atol=0 any round-off there (1e-17) fails. If "
                   "round-off is expected, record again with an --atol on the scale of the other numbers." % zeros)
+        odd = sum(1 for v in vals if math.isnan(v) or math.isinf(v))
+        if odd:
+            print("  WARNING: %d of the numbers are NaN or infinite. The golden accepts exactly that again, so a broken "
+                  "result keeps passing. Unless they are intended, fix the code first and record again." % odd)
         if dirty and a == "add":
             print("  note: recorded with uncommitted changes in the tree. Goldens should capture known-good "
                   "behavior (usually recorded before you change numerical code).")
@@ -4649,11 +5510,22 @@ def cmd_baseline(args):
                "Record it between tasks, or pass --force if the active task has no changes yet.")
     job_step("baseline", 1, 1, (st.get("durations") or {}).get("baseline:" + cmd))
     r = run_cmd(store, cmd, "baseline", None, int(cfg["verify_timeout"]))
+    switched = None
+    if not r.ok and stops_early(cmd):
+        # Tests after the first failure never ran, so this baseline cannot tell known failures from new ones.
+        variant = no_stop_variant(cmd)
+        if variant:
+            print("The suite stops at its first failure, so the tests after it never ran. Running every test: %s"
+                  % variant, flush=True)
+            job_step("baseline (every test)", 1, 1, (st.get("durations") or {}).get("baseline:" + variant))
+            switched, cmd = cmd, variant
+            r = run_cmd(store, cmd, "baseline", None, int(cfg["verify_timeout"]))
     with state_lock(repo):
         st, cfg = store.load()
         note_result(st, "baseline:" + cmd, None, r.ok, r.secs)
-        st["baseline"] = {"t": now_iso(), "cmd": cmd, "rc": r.rc, "failures": r.failing, "head": head_sha(repo)}
-        enrolled = args.cmd or not cfg.get("regress_cmd")
+        st["baseline"] = {"t": now_iso(), "cmd": cmd, "rc": r.rc, "failures": r.failing, "head": head_sha(repo),
+                          "failed_n": failure_count(r.lines), "summary": bool(r.summary)}
+        enrolled = args.cmd or not cfg.get("regress_cmd") or switched
         if enrolled:
             store.cfg["regress_cmd"] = cmd  # the suite the baseline describes is the one verify reruns
         atomic_write(repo.dir / "baseline.txt", "\n".join(r.failing) + ("\n" if r.failing else ""))
@@ -4668,11 +5540,31 @@ def cmd_baseline(args):
     else:
         print("WARNING: the suite failed (exit %d) but no failing test names could be parsed. verify will treat ANY "
               "failure of this suite as a regression. Ask the human whether the suite is expected to pass." % r.rc)
+    if not r.ok and stops_early(cmd):
+        print("WARNING: this suite stops at its first failure, so tests after a known failure never run and verify "
+              "cannot pass while any known failure remains. Use a command that runs every test: "
+              ".sci/sci baseline --cmd \"<suite without the stop option>\"")
+    if switched:
+        print("Recorded with `%s` instead of `%s`, so every test ran." % (cmd, switched))
     if enrolled:
         print("`.sci/sci verify` reruns this suite from now on (it took %.0fs). Too slow? Pick a narrower one: "
               ".sci/sci baseline --cmd \"<subset>\"" % r.secs)
     footer(store)
     return 0
+
+
+def review_ignored_tests(st, cfg, key, old):
+    """Ignored files are not guarded, so ignoring a locked or protected test is listed for the human."""
+    if key != "ignore_globs":
+        return
+    t = active_task(st)
+    guarded = set(st.get("protected") or {}) | set(st.get("protected_regions") or {}) | set(
+        ((t or {}).get("locked") or {})) | set(((t or {}).get("locked_regions") or {}))
+    hit = sorted(p for p in guarded if match_any(p, cfg.get("ignore_globs")) and not match_any(p, old or []))
+    if hit:
+        add_review(st, t["id"] if t else None, "ignored-test",
+                   "ignore_globs now covers guarded tests: %s" % ", ".join(hit[:8]))
+        print("note: %s no longer guarded (ignored); listed for human review." % ", ".join(hit[:4]))
 
 
 def cmd_config(args):
@@ -4683,10 +5575,11 @@ def cmd_config(args):
             refuse("%s is not a list setting." % args.key, "List settings: " + ", ".join(
                 sorted(k for k, v in DEFAULT_CONFIG.items() if isinstance(v, list))))
         items = split_scope([" ".join(args.value)])
-        with locked(store) as (_, cfg):
+        with locked(store) as (st, cfg):
             cur = list(cfg.get(args.key) or [])
             new = cur + [x for x in items if x not in cur] if args.action == "add" else [x for x in cur if x not in items]
             cfg[args.key] = new
+            review_ignored_tests(st, cfg, args.key, cur)
             store.log("CONFIG", msg="%s %s %s" % (args.key, args.action, ", ".join(items)))
             store.save()
         print("%s = %s" % (args.key, json.dumps(new)))
@@ -4711,8 +5604,10 @@ def cmd_config(args):
                 val = [x.strip() for x in raw.split(",") if x.strip()]
         else:
             val = raw
-        with locked(store) as (_, cfg):
+        with locked(store) as (st, cfg):
+            old = cfg.get(args.key)
             cfg[args.key] = val
+            review_ignored_tests(st, cfg, args.key, old)
             store.log("CONFIG", msg="%s=%s" % (args.key, val))
             store.save()
         print("%s = %s" % (args.key, json.dumps(val)))
@@ -4840,17 +5735,20 @@ UNDERSTAND
 WORK
   check [--cmd "narrower cmd"]    run the active task's verify command, and what the last verify failed on
                                   (fast loop; counts strikes)
-  lock [FILES] | lock --none "why"   lock the acceptance tests (after RED); --none: task has no test file
+  lock [FILES] | lock --none "why"   lock the acceptance tests (after RED); --none: task has no test file.
+                                  In Rust source files only the tests (#[cfg(test)], #[test]) are locked
   verify [--quick] [--fresh]      full gate: task + earlier tasks + goldens + regression suite. Reuses a step
                                   that passed on identical code (docs no test reads do not count); --fresh reruns
                                   all. An earlier task's tests that the suite runs anyway run only there
   wait [JOB] [--secs N]           output of the background check/verify/run (they return after wait_secs
                                   with STILL RUNNING; their result is saved when they finish) | cancel
   done -m "summary" [--add FILE]... [--allow-outside "why"] [--no-lock "why"] [--no-commit]
-  restore [--to green|start] [--paths P]...    undo safely (current version saved as a patch first)
-  unlock [FILES] --reason "..."   a test that is wrong or must follow an intended change (human reviews it)
+  restore [--to green|start] [--paths P]...    undo safely (current version saved as a patch first);
+                                  --to start after STOP is a fresh start: strikes reset
+  unlock [FILES] --reason "..."   before or after editing: a test that is wrong or must follow an intended
+                                  change; open until `done`, which guards the new version (human reviews it)
 DEBUG (required after STOP)
-  run "cmd"                       run an experiment from the repo root (PYTHONPATH includes the repo), logged
+  run "cmd" [--tail N]            run an experiment from the repo root (PYTHONPATH includes the repo), logged
   hyp add "cause" [--test "cmd"] | hyp refute H1 "evidence" | hyp confirm H1 "evidence" | hyp list [--all]
                                   (--revise changes the verdict of an already resolved hypothesis)
 NUMBERS
@@ -5075,8 +5973,30 @@ def needs_run_lock(args):
     return is_runner(args) or command_name(args) in ("done", "restore", "lock", "unlock", "task start", "task block")
 
 
+def split_run_options(args):
+    """`.sci/sci run "python3 probe.py" --tail 20`: options after a quoted command are sci's, not the command's
+    (argparse hands everything after the command to it)."""
+    words = list(args.command or [])
+    if len(words) < 2 or not any(ch.isspace() for ch in words[0]):
+        return
+    keep, i = [words[0]], 1
+    while i < len(words):
+        key, eq, val = words[i].partition("=")
+        if key in ("--tail", "--timeout", "--wait"):
+            v = val if eq else (words[i + 1] if i + 1 < len(words) else "")
+            if v.isdigit():
+                setattr(args, key[2:], int(v))
+                i += 1 if eq else 2
+                continue
+        keep.append(words[i])
+        i += 1
+    args.command = keep
+
+
 def dispatch(argv):
     args = build_parser().parse_args(argv or ["help"])
+    if command_name(args) == "run":
+        split_run_options(args)
     if command_name(args) == "config" and args.action in ("set", "add", "remove") and (
             not args.key or not args.value):
         print("REFUSED: usage: .sci/sci config %s KEY VALUE" % args.action)

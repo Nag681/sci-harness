@@ -2,8 +2,8 @@
 
 A real session, recorded with sci 3.0.0. Outputs are real but trimmed: most repeated `[sci] ... NEXT:`
 footer lines are left out, and `...` marks cuts in long test output. The `verify` outputs (sections 6 to 8)
-are shown as sci 3.2.0 prints them: a step that already passed on identical code is reused, and an earlier
-task's test runs once, inside the regression suite. The repository is a toy:
+are shown as sci 3.4.0 prints them: a step that already passed on identical code is reused, an earlier
+task's test runs once, inside the regression suite, and the last task's verify is the final one. The repository is a toy:
 `orbit/integrators.py` has `euler()` and `run()` for the harmonic oscillator x'' = -x. Copy the
 pattern, not the numbers.
 
@@ -313,7 +313,7 @@ DONE T2: Report Verlet energies in energy_demo.py | commit ae77d7c2b8
   files: energy_demo.py, tests/test_energy_demo.py
   protected tests (later tasks must not change them): tests/test_energy_demo.py
   note: added print/console output in energy_demo.py; keep only if intended.
-[sci] no active task | NEXT: All tasks done. Run `.sci/sci verify` (final regression), then report to the human with `.sci/sci report`.
+[sci] no active task | NEXT: All tasks done and the final verify passed. Run `.sci/sci report` and give the human the report, including every NEEDS YOUR REVIEW item.
 ```
 
 `verify` ran T1's test again inside the regression suite (once, not twice) and confirmed the Euler numbers
@@ -322,13 +322,6 @@ are unchanged. The print note is expected here: printing is the demo's job.
 ## 8. Finish
 
 ```
-$ .sci/sci verify
-note: the regression suite runs the tests of T1, T2, so their checks do not run separately.
-PASS golden euler_energy: reused (passed on identical code 9s ago)
-PASS regression suite: reused (passed on identical code 9s ago)
-VERIFY PASS
-[sci] no active task | NEXT: All tasks done and the final verify passed. Run `.sci/sci report` and give the human the report, including every NEEDS YOUR REVIEW item.
-
 $ .sci/sci report
 # .sci/sci report
 
@@ -345,8 +338,9 @@ Root causes found:
 - H1: velocity update ignores a(t+dt): should be v + 0.5*dt*(a(t) + a(t+dt)) (run 8: v1 = -0.05 equals the a(t)-only value; Verlet needs -0.09975)
 ```
 
-Nothing changed since T2's verify, so the final verify reused its results (`verify --fresh` reruns them). The
-final answer to the human is this report, plus anything it lists under NEEDS YOUR REVIEW.
+T2's verify ran every task's check, the golden and the suite on these files, so it is the final verify; had files
+changed after it, NEXT would ask for `.sci/sci verify` first. The final answer to the human is this report, plus
+anything it lists under NEEDS YOUR REVIEW.
 
 ## What to copy
 

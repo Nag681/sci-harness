@@ -50,10 +50,11 @@ def find_root(payload, extra=None):
         v = payload.get(key)
         if isinstance(v, str):
             cands.append(v)
-    for key in ("CLAUDE_PROJECT_DIR", "GEMINI_PROJECT_DIR"):
-        if os.environ.get(key):
-            cands.append(os.environ[key])
-    cands.append(os.getcwd())
+    if not cands:  # the payload names no directory: fall back to the environment (never to another repo)
+        for key in ("CLAUDE_PROJECT_DIR", "GEMINI_PROJECT_DIR"):
+            if os.environ.get(key):
+                cands.append(os.environ[key])
+        cands.append(os.getcwd())
     for c in cands:
         p = Path(uri_path(c)).expanduser()
         for d in [p] + list(p.parents):
@@ -114,30 +115,56 @@ def _checkout_files(s):
     return len([a for a in args if not a.startswith("-") and a != '""' and not re.match(r"\d*[<>&]", a)]) >= 2
 
 
+SHELL_ARG_RE = re.compile(r"(?:^|\s)(?:-\w*c|-Command|/c|eval)\s*$", re.I)  # sh -c "..", cmd /c "..", eval ".."
+SCI_PATH_RE = re.compile(r"(?:^|/)\.sci(?:/|$)")
+SCRATCH_RE = re.compile(r"(?:^|/)\.sci/scratch(?:/|$)")
+
+
+def _deletes_sci(s):
+    """A delete command whose target lies in .sci/, except the agent's own scratch files in .sci/scratch/."""
+    if not re.search(r"(^|\s)(rm|rmdir|rd|del|erase|ri|remove-item)\s", s, re.I):
+        return False
+    for tok in s.split():
+        t = tok.strip("'\"").replace("\\", "/")
+        if SCI_PATH_RE.search(t) and not (SCRATCH_RE.search(t) and ".." not in t):
+            return True
+    return False
+
+
+def _restore_is_destructive(s):
+    """git restore overwrites files unless it only unstages (--staged / -S, without --worktree / -W)."""
+    words = s.split()
+    args = words[words.index("restore") + 1:] if "restore" in words else []
+    short = "".join(a[1:] for a in args if a.startswith("-") and not a.startswith("--"))
+    staged = "--staged" in args or "S" in short
+    worktree = "--worktree" in args or "W" in short
+    return not staged or worktree
+
+
 def destructive_reason(cmd):
     if not isinstance(cmd, str):
         return None
-    # Quoted text is checked only as a command of its own (bash -c "git stash"); a message or note that
-    # mentions a git command is not one.
+    # Quoted text is checked as a command only where a shell runs it (bash -c "git stash", cmd /c "..."); a
+    # commit message or a note that mentions a git command is not one.
     for m in QUOTED_RE.finditer(cmd):
+        if not SHELL_ARG_RE.search(cmd[:m.start()]):
+            continue
         q = (m.group(1) if m.group(1) is not None else m.group(2)).replace('\\"', '"')
-        for part in SEP_RE.split(q):
-            if re.match(r"\s*(git|rm|rmdir|del|remove-item|\S*sci(\.py|\.cmd)?)\s", part, re.I):
-                r = destructive_reason(part)
-                if r:
-                    return r
+        r = destructive_reason(q)
+        if r:
+            return r
     for seg in SEP_RE.split(_unquote(cmd)):
         s = " " + " ".join(seg.split()) + " "
         if re.search(r"(^|[\s/\\])sci(\.py|\.cmd)?\s+(purge\b|review\s.*--clear\b)", s):
             return "sci purge / review --clear (human only)"
-        has_git = re.search(r"(^|\s)git\s", s) is not None
+        has_git = re.search(r"(^|[\s/\\])git(\.exe)?\s", s) is not None
         if has_git:
             if re.search(r"\sreset\s.*--hard\b", s):
                 return "git reset --hard"
             if re.search(r"\scheckout\s", s) and (re.search(r"\s--\s|\s\.\s|\s-f\s|--force|--ours|--theirs", s)
                                                   or _checkout_files(s)):
                 return "git checkout of files"
-            if re.search(r"\srestore\s", s) and ("--staged" not in s or "--worktree" in s or " -W " in s):
+            if re.search(r"\srestore\s", s) and _restore_is_destructive(s):
                 return "git restore"
             if re.search(r"\sclean\s", s) and re.search(r"\s-[a-zA-Z]*[fdxX]", s):
                 return "git clean"
@@ -151,8 +178,7 @@ def destructive_reason(cmd):
                 return "git switch --discard-changes"
             if re.search(r"\supdate-ref\s.*refs/sci", s):
                 return "deleting sci refs"
-        if (re.search(r"(^|\s)(rm|rmdir|rd|del|erase|ri|remove-item)\s", s, re.I)
-                and re.search(r"(^|[\s/\\'\"])\.sci([/\\\s'\"]|$)", s)):
+        if _deletes_sci(s):
             return "deleting .sci"
     return None
 

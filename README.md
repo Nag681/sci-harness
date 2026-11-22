@@ -8,7 +8,7 @@
 <div align="center">
 
 **Keeps AI coding agents on track in long, multi-step software work.**<br>
-Features, bug fixes, refactors and migrations, in any language, with small models or the largest.
+Features, bug fixes, refactors and migrations, in Python, Rust, JavaScript or any language, with small models or the largest.
 
 [![CI](https://github.com/Nag681/sci-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/Nag681/sci-harness/actions/workflows/ci.yml)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-3776AB?logo=python&logoColor=white)](#install)
@@ -193,7 +193,7 @@ FAIL check T1: exit 1 in 0.1s | log .sci/runs/0008-check-T1.log
   ...
   | AssertionError: 114.99 != 115.0 within 2 places (0.010000000000005116 difference)
   ...
-Attempt saved: .sci/attempts/T1-strike3-1795268248.patch
+Attempt saved: .sci/attempts/T1-strike3-1795324366.patch
 !!! STOP: 3 failed fix attempts in a row. Do NOT edit code now.
 !!! 1) .sci/sci hyp add "<specific, testable cause>"  (at least 2 hypotheses)
 !!! 2) test each with a tiny experiment, not a code fix: .sci/sci run "python3 .sci/scratch/probe.py"
@@ -247,10 +247,10 @@ VERIFY FAIL
 
 $ .sci/sci golden update shares --reason "the old shares lost a cent (3 x 33.33 = 99.99); now they add up to 100.00"
 Golden shares re-recorded: 3 numbers, rtol=1e-12 atol=0 (reproducible across 2 runs).
-[sci] T1 "Add a tip option to split()" | check FAIL 1s ago | strikes 0/3 | NEXT: Golden shares is up to date. Run `.sci/sci verify` again.
+[sci] T1 "Add a tip option to split()" | check FAIL 0s ago | strikes 0/3 | NEXT: Golden shares is up to date. Run `.sci/sci verify` again.
 
 $ .sci/sci verify
-PASS task T1: reused (passed on identical code 1s ago)
+PASS task T1: reused (passed on identical code 0s ago)
 PASS golden shares: 3 numbers within rtol=1e-12 atol=0
 PASS regression suite: exit 0 in 0.1s | log .sci/runs/0015-regress-T1.log
 VERIFY PASS
@@ -272,7 +272,7 @@ strike 1. One command brings everything back, and the last line says what to do 
 
 ```console
 $ .sci/sci resume
-=== .sci/sci resume | session 2 | sci/tip @ 4abce47d | 2 changed/untracked files | sci 3.3.1 ===
+=== .sci/sci resume | session 2 | sci/tip @ 287fd5f4 | 2 changed/untracked files | sci 3.4.0 ===
 OBJECTIVE: Add a tip option to the bill splitter
 PROGRESS: 0/2 done, 0 blocked, 1 todo
   [>] T1 Add a tip option to split()  <- ACTIVE
@@ -302,11 +302,11 @@ test:
 ```console
 $ .sci/sci verify
 note: the regression suite runs the tests of T1, so their checks do not run separately.
-PASS task T2: reused (passed on identical code 1s ago)
+PASS task T2: reused (passed on identical code 0s ago)
 PASS golden shares: 3 numbers within rtol=1e-12 atol=0
 FAIL regression suite: exit 1 in 0.1s | log .sci/runs/0019-regress-T2.log
   $ python3 -m unittest discover -s . -q
-  summary: Ran 4 tests in 0.000s | FAILED (failures=1)
+  summary: Ran 4 tests in 0.001s | FAILED (failures=1)
   failing (1): test_tip.TestTip.test_shares_add_up_to_bill_plus_tip
   ...
   | AssertionError: 114.99 != 115.0 within 2 places (0.010000000000005116 difference)
@@ -340,9 +340,9 @@ One commit per task, and a report for you:
 
 ```console
 $ git log --oneline
-7004380 feat: show the tip on the receipt [T2]
-af85b38 feat: tip option for split() [T1]
-4abce47 bill splitter
+2ddaef2 feat: show the tip on the receipt [T2]
+e841b23 feat: tip option for split() [T1]
+287fd5f bill splitter
 
 $ .sci/sci report
 # .sci/sci report
@@ -350,8 +350,8 @@ $ .sci/sci report
 Objective: Add a tip option to the bill splitter
 Tasks: 2/2 done, 0 blocked, 0 todo
 
-- T1 [done] Add a tip option to split() (commit af85b382a7)
-- T2 [done] Show the tip on the receipt (commit 7004380a2a)
+- T1 [done] Add a tip option to split() (commit e841b23b99)
+- T2 [done] Show the tip on the receipt (commit 2ddaef2dd9)
 
 Last verify: PASS 0s ago
 Goldens: shares OK
@@ -396,7 +396,7 @@ flowchart LR
 ```
 
 sci never edits your code. It checks, records and, when the agent asks, undoes. Optional
-[hooks](#optional-hooks) (off by default) also remind the agent of the plan every turn and block git commands
+[hooks](#optional-hooks) (off by default) also remind the agent of the plan with each of your messages and block git commands
 that destroy work.
 
 ### The loop, for every task
@@ -450,7 +450,7 @@ The full test output goes to `.sci/runs/`. The agent reads a short summary, so l
 | **Verify** | Runs these in order and stops at the first failure: the guard, the build (for compiled code), this task's test, each finished task's test, the saved outputs (compared to about 12 digits) and the whole test suite (only new failures count). |
 | **Rerun what failed** | After a failed `verify`, `check` also reruns the step that failed until it passes. For pytest and unittest it reruns only the failing tests. A fix that misses the failure is a strike. |
 | **Reuse** | `verify` doesn't rerun a step that passed on the same code with the same installed packages. A finished task's test that the whole suite runs anyway runs only there, and a failure names that task. `verify --fresh` reruns everything. |
-| **Done** | Refuses until `verify` has passed on the current files, the test is locked, nothing outside the task's files changed, no stray new files are left and no debugger lines remain. Edits made after `verify` to documentation, or to comments and layout in Python files, are fine unless a check reads them. Then `done` commits only the task's files, as `[T1]`, and protects their tests. |
+| **Done** | Refuses until `verify` has passed on the current files, the test is locked, nothing outside the task's files changed, no stray new files are left and no debugger lines remain. Edits made after `verify` to documentation, or to comments and layout in Python and Rust files, are fine unless a check reads them. Then `done` commits only the task's files, as `[T1]`, and protects their tests. |
 | **Long runs** | `check`, `verify`, `run`, `baseline` and `golden` keep running in the background. After 100 seconds the agent gets `STILL RUNNING` and collects the result with `.sci/sci wait`, so a tool timeout or a restarted session loses nothing. Files edited during a run make its result not count. |
 | **Restore** | Undoes to the last PASS or to the start of the task. It saves the current version as a patch first and always puts locked tests back exactly. |
 
@@ -474,7 +474,7 @@ After every command, sci prints a `NEXT:` line. It takes the first row that appl
 | the checks pass | run `verify` (again, if code changed since) |
 | verified | run `done` |
 | no task is active | start the next task whose dependencies are done |
-| every task is done | run a final `verify`, then `report` |
+| every task is done | `report` (the last task's verify was the final one; `verify` again only if files changed since) |
 | only blocked tasks are left | ask you their questions |
 
 </details>
@@ -541,9 +541,19 @@ don't need them. The example above is a bill splitter.
 <summary><b>Which languages and test runners does it support?</b></summary>
 
 Any language whose tests run from the command line. Each task names a command, and its exit code decides PASS or
-FAIL. For pytest, unittest, cargo, go, ctest, jest, vitest, Maven, Gradle, dotnet, RSpec and PHPUnit, sci also
-reads which tests failed, so a baseline of known failures works. For compiled code, set a build command once
-(`.sci/sci config set build_cmd "make"`) and sci rebuilds whenever a source file changes.
+FAIL. For pytest, unittest, cargo test, cargo nextest, go, ctest, jest, vitest, `node --test`, TAP, Maven, Gradle,
+dotnet, RSpec and PHPUnit, sci also reads which tests failed, so a baseline of known failures works.
+
+Python, Rust and JavaScript/TypeScript get the most help:
+
+- **Rust:** unit tests inside `src/*.rs` (`#[cfg(test)] mod tests`) are locked and protected on their own, so
+  the agent can keep editing the code around them but not the tests.
+- **JavaScript/TypeScript:** jest, vitest and `node --test` report each failing test by name, and snapshot files
+  count as tests.
+- **Python:** it also checks the structure of edited test code, for example a test that now returns early.
+
+If tests import built output (a C extension, a PyO3 module), set a build command once
+(`.sci/sci config set build_cmd "maturin develop"`) and sci rebuilds whenever a source file changes.
 
 </details>
 
@@ -730,8 +740,8 @@ The hooks are off unless you install with `--hooks`. They do nothing outside rep
 
 | When | What happens |
 | --- | --- |
-| a session starts, or the agent's memory was summarized | the agent is told where the plan is and what to do next |
-| every turn | a short reminder: the goal, the progress, the active task, the last check and the next step |
+| a session starts, or (Claude Code, Antigravity) the agent's memory was summarized | the agent is told where the plan is and what to do next |
+| each message you send (Antigravity: each step of the agent) | a short reminder: the goal, the progress, the active task, the last check and the next step |
 | before a shell command | commands that destroy work, such as `git reset --hard` and `git clean`, are blocked |
 | Antigravity stops | with `autopilot` on, the agent is asked to continue while tasks remain |
 

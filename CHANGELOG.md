@@ -5,6 +5,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.0] - 2026-11-22
+
+Rust and JavaScript/TypeScript are first-class next to Python, `verify` no longer passes a suite that hides new
+failures behind known ones, and several loops that stopped an agent that did nothing wrong are gone. Prompted by a
+review from Gemini; every finding below was reproduced before it was fixed.
+
+### Fixed
+- `verify` passed a regression suite whose named failures were all in the baseline even when it hid new ones: a
+  suite that stops at its first failure (`-x`, `-f`, `--bail`, plain `cargo test`), a runner that names files
+  rather than tests (jest), or a suite that crashed. It now fails with `NOT ONLY KNOWN FAILURES` when the run was
+  killed, ended without its summary, or failed more tests than the baseline. `baseline` records a stop-early suite
+  with the option that runs every test (`--no-fail-fast` for cargo, without `-x` for pytest).
+- A check that writes a file with changing content (a log, a timestamped report) made `done` refuse forever: every
+  verify rewrote the file, so the files never matched the verified ones. Untracked files a check writes are now
+  ignored from then on, unless the task scope names them, so they are never compared, locked or committed.
+- `lock` locked such files when their names looked like tests (`test_output.json`), and every later check failed
+  with `LOCKED FILE CHANGED`. Names like `test_*` make a file a test only if it is source code or lies in a test
+  directory.
+- `unlock` worked only after the test was edited; unlocking first (as SKILL.md says) still failed the next check.
+  A file unlocked during a task is now open until `done`, which guards its final version.
+- An agent that ignored STOP kept seeing STOP; ESCALATE now comes after 6 failed fixes as well. `restore --to
+  start` is a fresh start that resets the strikes; after two fresh starts NEXT says to ask the human.
+- Changing `build_cmd` neither rebuilt nor invalidated passes made with the old build.
+- `run "cmd" --tail 20` ran `cmd --tail 20`; options after a quoted command are sci's now.
+- `lock FILE` after `lock --none` left the task treated as having nothing to lock.
+- A pre-commit hook that rejected `done`'s commit left new files staged in the user's index.
+- The optional hooks blocked deleting `.sci/scratch/` files, notes and commit messages that start with "git reset
+  --hard" or "rm -rf .sci", and `git restore -S`; they let `/usr/bin/git reset --hard` through. A hook payload
+  that names a directory no longer falls back to another repository.
+- "tolerance loosened: places 7 -> 7" now names the loosened value.
+
+### Added
+- Rust: unit tests inside source files (`#[cfg(test)] mod tests`, `#[test]`, `#[tokio::test]`, `#[rstest]`,
+  `proptest!`) are found with a small lexer. `lock` locks only them, so the code around them stays editable;
+  `done` protects them; edits to them are checked for weakening; `restore --paths` puts back only the tests.
+  `cargo test` filters and `--test NAME` map to the files to lock. Failing tests are read from `cargo test -q`,
+  doc tests and nextest; after a failed verify `check` reruns only them (`-- --exact`). The suite is
+  `cargo test --no-fail-fast -q`, and a check like `cargo test -q parser` is left to it. `find` treats `impl`
+  blocks and `macro_rules!` as definitions. PyO3/maturin projects get a `build_cmd` hint. Comment and layout edits
+  in `.rs` files after a verify (`cargo fmt` included) need no new verify, as in Python; doc comments still count,
+  since cargo runs them as doc tests.
+- JavaScript/TypeScript: failing tests are named per test for jest (`file › test`), vitest, `node --test` and TAP;
+  snapshot files are tests; `test.skipIf`, `test.fails` and `toBeCloseTo` digits count as weakening; `init` picks
+  pnpm, yarn or bun from the lockfile.
+- Weakening checks: a dropped tolerance (`rtol=1e-12` removed), a duplicate test class, a test replaced by an
+  assignment or deleted, `if True: return`, `if not True:`, `#[ignore = "..."]`, `assert!(true)`, `if false {`,
+  and approx's `max_relative`/`max_ulps`.
+- `golden add` warns when the reference contains NaN or infinity.
+
+### Changed
+- The last `done` counts as the final verify when that task's full verify covered the same suite, goldens and
+  baseline, so an agent no longer runs a verify that only reuses every step.
+- On a large repository a check after an edit is about 5x faster (60,000 files: 2.8 s to 0.6 s): which code
+  mentions which documents is kept per file in `.sci/mentions.json`, and glob lists match as one regex.
+- SKILL.md: `allowed-tools` pre-approves only sci's own commands and read-only tools (`Bash(.sci/sci:*) Read Grep
+  Glob`) instead of every shell command and file edit. Language examples for Python, Rust and JavaScript;
+  `references/large-codebases.md` has a Rust and JavaScript section.
+
 ## [3.3.1] - 2026-11-21
 
 ### Fixed

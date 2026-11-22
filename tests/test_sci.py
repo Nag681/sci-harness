@@ -354,9 +354,8 @@ class TestLoop(unittest.TestCase):
         self.assertIn("tests/test_rk2.py", st["protected"])
         self.assertEqual(sb.git("for-each-ref", "refs/sci/T1").strip(), "")
         self.assertTrue((sb.root / "notes_by_human.txt").exists())
-        self.assertIn("All tasks done. Run `.sci/sci verify`", st["next"])
-        sb.ok("verify")
-        self.assertIn("final verify passed. Run `.sci/sci report`", sb.state()["next"])
+        self.assertIn("final verify passed. Run `.sci/sci report`", st["next"])  # T1's verify was the final one
+        self.assertEqual(st["last_verify"]["by_done"], "T1")
         sb.write("pkg/core.py", sb.read("pkg/core.py") + "\nEDITED_AFTER_FINAL_VERIFY = 1\n")
         self.assertIn("All tasks done. Run `.sci/sci verify`", sb.ok("resume"))
 
@@ -1443,7 +1442,7 @@ class TestUnits(unittest.TestCase):
                  "FAIL: not a jest line", "1) mocha suite", "Failed upload [1/3]", "1) Error::message is shown",
                  "Notes > see FAILED"]
         self.assertEqual(sci.extract_failures(lines), [
-            "src/sum.test.js", "src/math.test.ts", "com.example.FooTest.testBar", "com.example.FooTest.testBaz",
+            "src/sum.test.js", "src/math.test.ts > adds > negatives", "com.example.FooTest.testBar", "com.example.FooTest.testBaz",
             "com.example.BarTest.testQux", "Shop.Tests.CartTests.Empty", "./spec/cart_spec.rb:12",
             "Tests\\CartTest::testEmpty"])
         self.assertEqual(sci.extract_summary(["Tests run: 10, Failures: 1, Errors: 0, Skipped: 0",
@@ -1453,6 +1452,109 @@ class TestUnits(unittest.TestCase):
                                               "10 examples, 1 failure"]),
                          ["Failed!  - Failed:     1, Passed:     9, Skipped:     0, Total:    10",
                           "10 examples, 1 failure"])
+
+    def test_failure_ids_and_counts_of_cargo_jest_node_and_tap(self):
+        lines = ["running 2 tests", ". 1/2", "tests::broken --- FAILED", "---- tests::broken stdout ----",
+                 "test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+                 "---- integ_bad stdout ----", "test src/lib.rs - add (line 3) ... FAILED",
+                 "test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+                 "        FAIL [   0.004s] (2/4) geo::integ edge_case",
+                 " FAIL  src/cart.test.ts", "  ● cart › totals", "  ● Console", " PASS  src/ok.test.ts",
+                 "  ● not a failure", "Tests:       1 failed, 1 passed, 2 total",
+                 "test at test/cart.test.mjs:5:3", "✖ totals (0.57ms)", "ℹ fail 1",
+                 "not ok 3 - flaky # TODO later", "not ok 4 - real bad"]
+        self.assertEqual(sci.extract_failures(lines), [
+            "tests::broken", "integ_bad", "src/lib.rs - add (line 3)", "edge_case", "src/cart.test.ts",
+            "src/cart.test.ts › cart › totals", "test/cart.test.mjs > totals", "real bad"])
+        self.assertEqual(sci.failure_count(lines), 5)
+        self.assertEqual(sci.failure_count(["FAILED (failures=2, errors=1)"]), 3)
+        self.assertEqual(sci.failure_count(["=== 2 failed, 9 passed, 1 error in 0.3s ==="]), 3)
+        self.assertIsNone(sci.failure_count(["all good"]))
+
+    def test_suites_that_stop_at_the_first_failure(self):
+        for cmd, stops, variant in [
+                ("python3 -m pytest -x -q tests", True, "python3 -m pytest -q tests"),
+                ("python3 -m unittest discover -s tests -f", True, "python3 -m unittest discover -s tests"),
+                ("pytest --maxfail=2 tests", True, "pytest tests"),
+                ("cargo test -q", True, "cargo test -q --no-fail-fast"),
+                ("cargo test -q -- --test-threads 1", True, "cargo test -q --no-fail-fast -- --test-threads 1"),
+                ("cargo test --no-fail-fast", False, None), ("cargo test --lib", False, None),
+                ("cargo nextest run", True, "cargo nextest run --no-fail-fast"),
+                ("npx jest --bail", True, "npx jest"), ("npx vitest run", False, None),
+                ("go test -failfast ./...", True, "go test ./..."), ("mvn test", True, "mvn test --fail-at-end"),
+                ("./gradlew test --continue", False, None), ("npm test", False, None),
+                ("make test && cargo test", False, None)]:
+            self.assertEqual((sci.stops_early(cmd), sci.no_stop_variant(cmd)), (stops, variant), cmd)
+        self.assertTrue(sci.crashed(139) and sci.crashed(-11) and not sci.crashed(1) and not sci.crashed(101))
+
+    def test_rust_test_regions(self):
+        src = ('use std::fmt; // a { brace in a comment\n/* nested /* comment { */ still } */\n'
+               'pub fn add(a: i64, b: i64) -> i64 { let s = "{"; let c = \'{\'; let r = r#"raw { "#; a + b }\n'
+               "pub fn lt<'a>(x: &'a str) -> &'a str { x }\n\n"
+               '#[cfg(test)]\nmod tests {\n    use super::*;\n    #[test]\n    fn adds() { assert_eq!(add(2, 2), 4); }\n}\n\n'
+               '#[cfg(not(test))]\nfn real() {}\n\n'
+               '#[tokio::test(flavor = "multi_thread")]\nasync fn top() {\n    assert!(true);\n}\n\n'
+               'proptest! {\n    #[test]\n    fn prop(x in 0..10i64) { prop_assert!(add(x, 0) == x); }\n}\npub fn after() {}\n')
+        regions = sci.test_region_text("src/lib.rs", src).split("\n%s\n" % sci.REGION_SEP)
+        self.assertEqual([r.splitlines()[0] for r in regions],
+                         ["#[cfg(test)]", '#[tokio::test(flavor = "multi_thread")]', "proptest! {"])
+        self.assertNotIn("real", "".join(regions))
+        self.assertNotIn("after", "".join(regions))
+        changed = src.replace("add(2, 2), 4", "add(2, 2), 5")
+        self.assertEqual(sci.splice_regions("src/lib.rs", changed, sci.test_region_text("src/lib.rs", src)), src)
+        self.assertEqual(sci.test_region_text("src/lib.py", src), "")
+
+    def test_rust_comment_and_layout_edits_are_not_code_changes(self):
+        a = 'pub fn area(w: f64, h: f64) -> f64 {\n    w * h // product\n}\n/// area(2.0, 3.0) == 6.0\nfn s() -> &str { "a  b" }\n'
+        self.assertTrue(sci.same_syntax(a, a.replace("w * h // product", "w*h /* { */"), path="src/lib.rs"))
+        self.assertTrue(sci.same_syntax(a, a.replace("(w: f64, h: f64)", "(\n    w: f64,\n    h: f64,\n)"), path="src/lib.rs"))
+        self.assertFalse(sci.same_syntax(a, a.replace("== 6.0", "== 7.0"), path="src/lib.rs"))  # a doc test
+        self.assertFalse(sci.same_syntax(a, a.replace('"a  b"', '"a b"'), path="src/lib.rs"))
+        self.assertFalse(sci.same_syntax(a, a.replace("(w: f64, h: f64)", "(\n    w: f64,\n    h: f64,\n)"),
+                                         lines=True, path="src/lib.rs"))
+
+    def test_data_files_named_like_tests_are_not_tests(self):
+        cfg = sci.DEFAULT_CONFIG
+        for p, want in [("test_output.json", False), ("results/test_run.log", False), ("tests/data/x.json", True),
+                        ("test_x.py", True), ("src/geo_test.go", True), ("src/__snapshots__/a.test.ts.snap", True),
+                        ("src/tests.rs", True), ("src/lib.rs", False), ("web/cart.spec.ts", True)]:
+            self.assertEqual(sci.is_test(p, cfg), want, p)
+
+    def test_cargo_suites_rerun_only_failing_tests_and_cover_checks(self):
+        self.assertEqual(sci.narrow_suite("cargo test --no-fail-fast -q", ["tests::broken", "integ_bad"], {}),
+                         "cargo test --no-fail-fast -q -- --exact tests::broken integ_bad")
+        self.assertIsNone(sci.narrow_suite("cargo test -q", ["src/lib.rs - add (line 3)"], {}))
+        self.assertEqual(sci.runner_covers("cargo test --no-fail-fast -q", "cargo test -q parser", ["known"]), ["parser"])
+        self.assertIsNone(sci.runner_covers("cargo test -q", "cargo test -q parser", ["known"]))
+
+    def test_weakening_rules_for_rust_js_and_dropped_tolerances(self):
+        def issues(path, rem, add):
+            return sci.weakening_issues(path, [{"rem": rem, "add": add}])
+        self.assertEqual(issues("tests/test_x.py", ["    assert_allclose(a, b, rtol=1e-12)"], ["    assert_allclose(a, b)"]),
+                         ["tolerance removed: rtol (the default may be looser)"])
+        self.assertEqual(issues("tests/test_x.py", ["    assertAlmostEqual(x, y, places=7)", "    assertAlmostEqual(u, v, places=2)"],
+                                ["    assertAlmostEqual(x, y, places=7)", "    assertAlmostEqual(u, v, places=1)"]),
+                         ["tolerance loosened: places 2 -> 1"])
+        self.assertIn('skip/xfail added: #[ignore = "slow"]', issues("src/lib.rs", ["    #[test]"], ["    #[test]", '    #[ignore = "slow"]']))
+        self.assertIn("tolerance loosened: max_relative 1e-12 -> 0.001",
+                      issues("src/lib.rs", ["assert_relative_eq!(a, b, max_relative = 1e-12);"],
+                             ["assert_relative_eq!(a, b, max_relative = 1e-3);"]))
+        self.assertIn("tolerance loosened: tobecloseto 5 -> 2",
+                      issues("a.test.ts", ["expect(x).toBeCloseTo(3.14159, 5);"], ["expect(x).toBeCloseTo(3.14159, 2);"]))
+        self.assertTrue(issues("a.test.ts", ['  it("adds", () => {'], ['  it.skipIf(ci)("adds", () => {']))
+        self.assertTrue(issues("src/lib.rs", ["    assert_eq!(x, 5);"], ["    if false {", "    assert_eq!(x, 5);", "    }"]))
+        self.assertTrue(issues("src/lib.rs", ["    assert_eq!(x, 5);"], ["    assert!(true);"]))
+        self.assertEqual(issues("a.test.ts", ["function close(a: number, tol: number) {"],
+                                ["function close(a: number, eps = 1e-9) {"]), [])
+        old = "import unittest\nclass TestRK2(unittest.TestCase):\n    def test_order(self):\n        assert 1 + 1 == 2\n"
+        for extra, word in [("class TestRK2(unittest.TestCase):\n    pass\n", "defined twice"),
+                            ("TestRK2.test_order = lambda self: None\n", "replaced by an assignment"),
+                            ("del TestRK2\n", "deleted")]:
+            self.assertIn(word, " ".join(sci.py_test_issues(old + extra) - sci.py_test_issues(old)))
+        self.assertIn("early `return`", " ".join(sci.py_test_issues(
+            old.replace("        assert", "        if True:\n            return\n        assert"))))
+        self.assertIn("`if not True:` block", " ".join(sci.py_test_issues(
+            old.replace("        assert", "        if not True:\n            assert"))))
 
     def test_weakening_rules(self):
         def issues(old, new, path="tests/test_x.py"):
@@ -1809,6 +1911,236 @@ class TestBuild(unittest.TestCase):
         sb.write("ext/fast.c", "int f(void){return 2;}\n")
         sb.ok("check")
         self.assertEqual(sb.read("build.log").count("built"), 2)
+        sb.ok("config", "set", "build_cmd", "echo rebuilt-with-new-flags >> build.log")
+        sb.ok("check")  # same sources, different build: it runs
+        self.assertIn("rebuilt-with-new-flags", sb.read("build.log"))
+
+
+FAKE_SUITE = '''\
+import os, sys
+mode = open("mode.txt").read().strip()
+print(" FAIL  src/cart.test.ts")
+if mode == "base":
+    print("Tests:       1 failed, 50 passed, 51 total")
+elif mode == "more":
+    print("Tests:       4 failed, 47 passed, 51 total")
+else:
+    sys.stdout.flush()
+    os._exit(139)  # what bash reports for a test process killed by SIGSEGV
+sys.exit(1)
+'''
+
+
+class TestVerdicts(unittest.TestCase):
+    """A suite run whose named failures are all known baseline failures can still hide new ones."""
+
+    def _known_failure(self, sb):
+        sb.write("suite.py", FAKE_SUITE)
+        sb.write("mode.txt", "base\n")
+        sb.git("add", "-A")
+        sb.git("commit", "-q", "-m", "suite")
+        sb.init()
+        self.assertIn("1 pre-existing failures", sb.ok("baseline", "--cmd", "%s suite.py" % PYQ))
+        sb.ok("task", "add", "t", "--verify", "true", "--scope", "mode.txt")
+        sb.ok("task", "start")
+        sb.ok("check")
+        sb.ok("lock", "--none", "the suite alone decides in this test")
+
+    def test_more_failures_behind_a_file_level_id_fail_verify(self):
+        sb = Sandbox(self)
+        self._known_failure(sb)
+        sb.write("mode.txt", "more\n")
+        rc, out = sb.sci("verify")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("NOT ONLY KNOWN FAILURES", out)
+        self.assertIn("4 tests fail now, 1 in the baseline", out)
+
+    def test_a_crashed_suite_fails_verify(self):
+        sb = Sandbox(self)
+        self._known_failure(sb)
+        sb.write("mode.txt", "crash\n")
+        rc, out = sb.sci("verify")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("was killed (exit 139)", out)
+
+    def test_baseline_of_a_fail_fast_suite_runs_every_test(self):
+        sb = Sandbox(self)
+        sb.write("tests/test_a_legacy.py", "import unittest\n\nclass TestLegacy(unittest.TestCase):\n"
+                                            "    def test_old(self):\n        self.assertEqual(1, 2)\n")
+        sb.git("add", "-A")
+        sb.git("commit", "-q", "-m", "legacy failing test")
+        sb.init()
+        out = sb.ok("baseline", "--cmd", "%s discover -s tests -t . -f" % UT)
+        self.assertIn("instead of", out)
+        self.assertNotIn(" -f", sb.state()["baseline"]["cmd"])
+        sb.ok("task", "add", "noop", "--verify", "true", "--scope", "pkg/core.py")
+        sb.ok("task", "start")
+        sb.write("pkg/core.py", sb.read("pkg/core.py").replace("return x * k", "return x * k + 1.0"))
+        rc, out = sb.sci("verify")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("NEW FAILURES", out)
+
+
+class TestEnablers(unittest.TestCase):
+    """Things that used to stop an agent that did nothing wrong."""
+
+    def test_unlock_before_editing_a_protected_test(self):
+        sb = Sandbox(self)
+        sb.finish_rk2()
+        sb.ok("task", "add", "speed", "--verify", "%s tests.test_core -q" % UT, "--scope", "pkg/core.py")
+        sb.ok("task", "start")
+        out = sb.ok("unlock", "tests/test_rk2.py", "--reason", "order test must follow the new integrator API")
+        self.assertIn("checks accept its changes until `done`", out)
+        self.assertIn("unlocked for this task", sb.ok("resume"))
+        sb.write("tests/test_rk2.py", sb.read("tests/test_rk2.py").replace("1.9", "1.8"))
+        sb.ok("check")
+        sb.ok("lock")
+        sb.ok("verify")
+        sb.ok("done", "-m", "perf: speed")
+        self.assertEqual(sb.state()["protected"]["tests/test_rk2.py"]["task"], "T2")
+        sb.ok("task", "add", "more", "--verify", "%s tests.test_core -q" % UT, "--scope", "pkg/core.py")
+        sb.ok("task", "start")
+        sb.write("tests/test_rk2.py", sb.read("tests/test_rk2.py").replace("1.8", "1.5"))
+        rc, out = sb.sci("check")
+        self.assertIn("PROTECTED TEST CHANGED (locked by T2)", out)
+
+    def test_files_a_check_writes_are_ignored_and_never_block_done(self):
+        sb = Sandbox(self)
+        sb.init()
+        sb.ok("task", "add", "t", "--verify", "%s -c \"import time; open('test_output.json', 'w').write(repr(time.time()))\""
+              " && %s tests.test_core -q" % (PYQ, UT), "--scope", "pkg/core.py")
+        sb.ok("task", "start")
+        out = sb.ok("check")
+        self.assertIn("sci ignores it from now on", out)
+        self.assertIn("test_output.json", json.loads(sb.read(".sci/config.json"))["ignore_globs"])
+        out = sb.ok("lock")
+        self.assertNotIn("test_output.json", out)
+        sb.write("pkg/core.py", sb.read("pkg/core.py") + "\n\ndef double(x):\n    return 2 * x\n")
+        sb.ok("check")
+        sb.ok("verify")
+        sb.ok("done", "-m", "feat: double")
+        self.assertNotIn("test_output.json", sb.git("ls-files"))
+
+    def test_escalate_after_six_failed_fixes_and_a_fresh_start_resets_strikes(self):
+        sb = Sandbox(self)
+        sb.init()
+        sb.add_rk2_task()
+        sb.ok("task", "start")
+        sb.write_rk2_test()
+        sb.sci("check")
+        sb.ok("lock")
+        for i in range(6):
+            sb.write_rk2(good=False)
+            sb.write("pkg/core.py", sb.read("pkg/core.py") + "\n# attempt %d\n" % i)
+            rc, out = sb.sci("check")
+            self.assertEqual(rc, 1, out)
+        self.assertIn("NEXT: ESCALATE", sb.ok("resume"))
+        out = sb.ok("restore", "--to", "start")
+        self.assertIn("Strikes reset", out)
+        t = sb.state()["tasks"][0]
+        self.assertEqual((t["strikes"], t["stop"], t["resets"]), (0, None, 1))
+
+    def test_run_options_after_a_quoted_command_are_sci_options(self):
+        sb = Sandbox(self)
+        sb.init()
+        out = sb.ok("run", "echo hello", "--tail", "5")
+        self.assertIn("| hello", out)
+        self.assertNotIn("--tail", out.split("Cite it")[0])
+
+    def test_locking_files_after_lock_none_needs_them_locked(self):
+        sb = Sandbox(self)
+        sb.init()
+        sb.ok("task", "add", "t", "--verify", "%s tests.test_core -q" % UT, "--scope", "pkg/core.py")
+        sb.ok("task", "start")
+        sb.ok("lock", "--none", "a refactor guarded by existing tests")
+        sb.ok("lock", "tests/test_core.py")
+        self.assertIsNone(sb.state()["tasks"][0]["lock_none"])
+
+    def test_a_rejected_commit_leaves_the_index_as_it_was(self):
+        sb = Sandbox(self)
+        hook = sb.write(".git/hooks/pre-commit", "#!/bin/sh\necho 'lint says no'\nexit 1\n")
+        os.chmod(str(hook), 0o755)
+        sb.init()
+        sb.ok("task", "add", "t", "--verify", "%s tests.test_core -q" % UT, "--scope", "pkg")
+        sb.ok("task", "start")
+        sb.ok("lock", "--none", "a new module guarded by existing tests")
+        sb.write("pkg/extra.py", "X = 1\n")
+        sb.ok("verify")
+        rc, out = sb.sci("done", "-m", "feat: extra")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("lint says no", out)
+        self.assertEqual(sb.git("diff", "--cached", "--name-only").strip(), "")
+
+    def test_golden_warns_about_nan(self):
+        sb = Sandbox(self)
+        sb.init()
+        self.assertIn("NaN or infinite", sb.ok("golden", "add", "e", "--cmd", "echo 'energy nan residual 1e-9'"))
+
+    def test_the_last_done_is_the_final_verify(self):
+        sb = Sandbox(self)
+        out = sb.finish_rk2()
+        self.assertIn("All tasks done and the final verify passed", out)
+
+
+RUST_LIB = '''\
+pub fn area(w: f64, h: f64) -> f64 {
+    0.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn area_of_rectangle() {
+        assert!((area(2.0, 3.0) - 6.0).abs() < 1e-12);
+    }
+}
+'''
+
+
+@unittest.skipUnless(shutil.which("cargo"), "cargo not installed")
+class TestRust(unittest.TestCase):
+    def test_inline_tests_are_locked_protected_and_restored_without_the_code(self):
+        sb = Sandbox(self)
+        sb.git("rm", "-r", "-q", "pkg", "tests", "demo.py")
+        sb.write("Cargo.toml", '[package]\nname = "geo"\nversion = "0.1.0"\nedition = "2021"\n')
+        sb.write(".gitignore", "/target\n")
+        sb.write("src/lib.rs", RUST_LIB.split("#[cfg(test)]")[0])
+        sb.git("add", "-A")
+        sb.git("commit", "-q", "-m", "crate")
+        sb.ok("init", "--objective", "geometry")
+        self.assertIn("--no-fail-fast", sb.ok("config"))
+        sb.ok("task", "add", "area", "--verify", "cargo test -q --lib tests::area", "--scope", "src/lib.rs")
+        sb.ok("task", "start")
+        sb.write("src/lib.rs", RUST_LIB)
+        rc, out = sb.sci("check", timeout=600)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("tests::area_of_rectangle", out)
+        out = sb.ok("lock")
+        self.assertIn("src/lib.rs (its tests only)", out)
+        sb.write("src/lib.rs", RUST_LIB.replace("    0.0\n", "    w * h\n"))
+        sb.ok("check", timeout=600)
+        sb.write("src/lib.rs", sb.read("src/lib.rs").replace("< 1e-12", "< 10.0"))
+        rc, out = sb.sci("check", timeout=600)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("LOCKED TESTS CHANGED: src/lib.rs", out)
+        out = sb.ok("restore", "--paths", "src/lib.rs")
+        self.assertIn("Restored the locked tests in src/lib.rs", out)
+        self.assertIn("w * h", sb.read("src/lib.rs"))
+        self.assertIn("< 1e-12", sb.read("src/lib.rs"))
+        sb.ok("verify", timeout=600)
+        sb.write("src/lib.rs", sb.read("src/lib.rs").replace("    w * h\n", "    // the product of the sides\n    w * h\n"))
+        out = sb.ok("done", "-m", "feat: area")  # a comment after verify needs no new verify
+        self.assertIn("src/lib.rs (tests)", out)
+        self.assertIn("Only documentation, comments or layout changed", out)
+        sb.ok("task", "add", "perimeter", "--verify", "cargo test -q --lib", "--scope", "src/lib.rs")
+        sb.ok("task", "start")
+        sb.write("src/lib.rs", sb.read("src/lib.rs").replace("< 1e-12", "< 1e-3"))
+        rc, out = sb.sci("check", timeout=600)
+        self.assertIn("PROTECTED TESTS CHANGED (locked by T1): src/lib.rs", out)
+        sb.ok("unlock", "src/lib.rs", "--reason", "tolerance must follow the float32 port")
+        sb.ok("check", timeout=600)
 
 
 HOOK = SCI.parent / "sci_hook.py"
@@ -1829,12 +2161,16 @@ class TestHooks(unittest.TestCase):
                "cd repo && git checkout HEAD -- .", "rm -rf .sci", "git -C x reset --hard", "git switch -f main",
                "git restore --staged --worktree a.py", "git checkout HEAD file.py", "git checkout HEAD~1 src/",
                'bash -c "git stash"', "sh -c 'cd x; git clean -fdx'", ".sci/sci purge --yes",
-               ".sci/sci review --clear --yes", 'rm -rf ".sci"']
+               ".sci/sci review --clear --yes", 'rm -rf ".sci"', "/usr/bin/git reset --hard", "\\git reset --hard",
+               "git restore -SW a.py", 'powershell -Command "git stash"', 'cmd /c "git clean -fd"',
+               "rm -rf .sci/scratch/../state.json"]
         good = ["git status", "git checkout -b topic", "git checkout main", "git restore --staged a.py",
                 "git stash list", "git diff", "rm -rf build/.scikit", "git log --oneline", "git push origin topic",
                 "pytest -q", "git commit -m 'fix: x'", '.sci/sci note "never run git stash or git restore" --kind gotcha',
                 'git commit -m "avoid git clean -fd; it deletes data"', "git checkout main 2>/dev/null",
-                ".sci/sci review", '.sci/sci done -m "fix: git reset --hard handling"']
+                ".sci/sci review", '.sci/sci done -m "fix: git reset --hard handling"',
+                "rm .sci/scratch/probe.py", "rm -rf .sci/scratch/old", "git restore -S a.py",
+                '.sci/sci note "git reset --hard wiped our build" --kind gotcha', 'git commit -m "rm -rf .sci cleanup"']
         for c in bad:
             self.assertIsNotNone(sci_hook.destructive_reason(c), c)
         for c in good:
