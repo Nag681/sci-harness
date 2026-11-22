@@ -8,9 +8,19 @@ long jobs.
 
 **[Get started](#get-started)** · [Good to know](#good-to-know) · [For developers](docs/how-it-works.md)
 
+## Same job, two endings
+
+You ask your agent to add text reminders to your dental clinic's booking site, then go home.
+
+| | Without Sci&#8209;Harness | With Sci&#8209;Harness |
+| --- | --- | --- |
+| **That night** | “Done. All checks pass.” | “Done. 5 steps, each checked and saved.” |
+| **What really happened** | It switched off the failing reminder check. Its new code also broke the booking form. | Switching a check off counts as a failure, so it found the real bug: reminders were a day early. The broken booking form was caught before saving. |
+| **Next morning** | ❌ Patients turn up a day early, and nobody can book. | ✅ Reminders go out for the right day, and booking works. |
+
 ## Big jobs are where agents slip
 
-Your agent starts strong, then slips a few hours in. Sci-Harness works like a climber's harness: every finished
+Agents slip on long jobs in four ways. Sci-Harness works like a climber's harness: every finished
 step is checked and saved, so a slip costs one step, not the whole job.
 
 | Without Sci&#8209;Harness | With Sci&#8209;Harness |
@@ -19,21 +29,6 @@ step is checked and saved, so a slip costs one step, not the whole job.
 | ❌ **It fakes the fix.** When a check fails, it quietly makes the check easier. | ✅ **The checks are locked.** Making a check easier counts as a failure. |
 | ❌ **It goes in circles.** The same broken fix, again and again. | ✅ **Three misses, then it stops.** It has to find the cause before it tries again. |
 | ❌ **It breaks what worked.** A new change quietly undoes an old one. | ✅ **Every step is re-checked.** Old features are tested again before anything is saved. |
-
-## One evening, start to finish
-
-At 6 PM you ask your agent for a shopping cart, then step away.
-
-| When | What happens |
-| --- | --- |
-| 6:00&nbsp;PM | 📝 **The plan is written.** Four steps, each with a check that proves it works. |
-| 6:40&nbsp;PM | ✅ **Step 1 is saved.** Items go into the cart. |
-| 7:15&nbsp;PM | ⚠️ **A fake fix is caught.** A check was made easier, so it is put back as it was. |
-| 8:05&nbsp;PM | ⚠️ **Three misses, then a stop.** It stops guessing and tests its ideas to find the cause. |
-| 8:30&nbsp;PM | ✅ **Step 2 is saved.** Prices and totals add up. |
-| 9:10&nbsp;PM | ⚠️ **The chat is trimmed.** It reads its notes and picks up where it left off. |
-| 10:20&nbsp;PM | ⚠️ **Step 3 breaks step 1.** Caught before it is saved, then fixed. |
-| 11:40&nbsp;PM | 🏁 **Done.** 4 steps saved, 4 slips caught, and a short report with 1 question for you. |
 
 ## Get started
 
@@ -53,7 +48,7 @@ irm https://raw.githubusercontent.com/Nag681/sci-harness/main/install.ps1 | iex
 
 **2. Give your agent a big job.** Restart your agent, open your project and type:
 
-> **`/sci add a shopping cart to my store`**
+> **`/sci add text reminders to my booking site`**
 
 **3. Read the report.** When the job is done, your agent tells you what changed and what needs you.
 

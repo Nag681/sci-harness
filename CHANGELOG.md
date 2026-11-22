@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - The README is written for anyone who uses a coding agent, not just developers, in plain Markdown: what goes
-  wrong on long jobs and how Sci-Harness catches it, one evening's job as a timeline, and a one-line install.
+  wrong on long jobs and how Sci-Harness catches it, one job with and without it, and a one-line install.
   The technical material
   (the rules, commands, settings, install options, hooks and Windows notes) moved to `docs/how-it-works.md`.
 - The installer no longer copies `docs/` into installed skills.
