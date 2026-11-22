@@ -1,8 +1,8 @@
 """Draws the README's images and checks its quoted output.
 
 Without arguments, it draws the banner in a light and a dark version. Given the transcript of demo.sh, it also
-draws the terminal picture of `resume`, and it fails if a line in one of the README's console blocks is not in
-the transcript, so every quote stays real output.
+draws the README's terminal pictures from it, saves it as session.txt, and fails if a line in one of the
+README's console blocks is not in the transcript (timings and hashes aside), so every quote stays real output.
 
   sh .github/readme/demo.sh > demo.txt && python3 .github/readme/build.py demo.txt
 """
@@ -99,38 +99,68 @@ TERM = dict(bg="#0d1117", bar="#161b22", border="#30363d", fg="#e6edf3", muted="
             accent="#79c0ff", red="#ff7b72", green="#3fb950", amber="#e3b341")
 RULES = [
     (r"^=== .* ===$", "muted"),
-    (r"^ {2}(verify|scope |invariants|locked|last check|failing):", "muted"),
+    (r"^ {2}(verify|scope |invariants|locked|last check|failing|deps):", "muted"),
     (r"^ {2}N\d+ \[\w+\]", "muted"),
+    (r"^ {2}\| .*", "muted"),
     (r"^(OBJECTIVE|PROGRESS|ACTIVE T\d+|NOTES \([^)]*\)|GOLDENS|BASELINE):", "head"),
     (r"\[ \]", "muted"),
-    (r"\bFAIL\b", "red"),
-    (r"\bOK\b|\bPASS\b", "green"),
-    (r"\[>\]|<- ACTIVE|[Ss]trikes? \d/3", "amber"),
+    (r"\bFAIL\b|\bFAILED\b|^CHECK COUNTS AS FAIL\b.*|^GUARD: .*|^REGRESSION: .*|^NEW FAILURES.*", "red"),
+    (r"\bOK\b|\bPASS\b|\bok\b|^Restored .*|^H\d confirmed\.|^STOP cleared.*", "green"),
+    (r"\b[1-9]\d* ignored\b|^H\d refuted\.", "amber"),
+    (r"\[>\]|<- ACTIVE|[Ss]trikes? \d/3|^!!! .*", "amber"),
+    (r"^!!! STOP\b.*", "red"),
+    (r"^VERIFY FAIL$", "red"),
+    (r"^VERIFY PASS$", "green"),
     (r"^NEXT:", "accent"),
+    (r"^\$ .*", "fg"),
     (r"^\$", "muted"),
+    (r"^# .*|^\.\.\.$|^ {2}\.\.\.$", "muted"),
+    (r"^@@ .* @@$", "muted"),
+    (r"^\+.*", "green"),
+    (r"^-.*", "red"),
 ]
+WRAP = 104  # columns; longer lines wrap like a terminal, with a small indent
 
 
-def spans(line):
-    paint = ["fg"] * len(line)
+def paint(line):
+    colors = ["fg"] * len(line)
     for pat, color in RULES:
         for m in re.finditer(pat, line):
-            paint[m.start():m.end()] = [color] * (m.end() - m.start())
+            colors[m.start():m.end()] = [color] * (m.end() - m.start())
+    return colors
+
+
+def wrapped(line):
+    """[(text, colors)] visual lines of `line`, wrapped at a space before WRAP columns."""
+    colors, out, first = paint(line), [], True
+    while True:
+        room = WRAP - (0 if first else 4)
+        if len(line) <= room:
+            out.append((("" if first else "    ") + line, (["fg"] * (0 if first else 4)) + colors))
+            return out
+        cut = line.rfind(" ", 0, room)
+        cut = room if cut <= 0 else cut
+        out.append((("" if first else "    ") + line[:cut], (["fg"] * (0 if first else 4)) + colors[:cut]))
+        line, colors, first = line[cut:].lstrip(" "), colors[cut + len(line[cut:]) - len(line[cut:].lstrip(" ")):], False
+
+
+def runs(text, colors):
     i = 0
-    while i < len(line):
+    while i < len(text):
         j = i
-        while j < len(line) and paint[j] == paint[i]:
+        while j < len(text) and colors[j] == colors[i]:
             j += 1
-        yield i, line[i:j], paint[i]
+        yield i, text[i:j], colors[i]
         i = j
 
 
-def terminal(lines, title):
+def terminal(lines, title, label):
+    rows = [r for line in lines for r in wrapped(line)]
     cw, lh, pad, top = 9.0, 22, 24, 62
-    w = int(max(880, pad * 2 + 40 + cw * max(len(s) for s in lines)))  # 40: room for fonts wider than 0.6em
-    h = top + lh * len(lines) + 16
+    w = int(max(880, pad * 2 + 40 + cw * max(len(t) for t, _ in rows)))  # 40: room for fonts wider than 0.6em
+    h = top + lh * len(rows) + 16
     out = ['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %d %d" width="%d" height="%d" role="img" '
-           'aria-label="Terminal output of %s">' % (w, h, w, h, escape(lines[0].lstrip("$ "))),
+           'aria-label="%s">' % (w, h, w, h, escape(label, {'"': "&quot;"})),
            '<rect x="1" y="1" width="%d" height="%d" rx="12" fill="%s" stroke="%s" stroke-width="2"/>'
            % (w - 2, h - 2, TERM["bg"], TERM["border"]),
            '<path d="M2 38V13A11 11 0 0 1 13 2H%d A11 11 0 0 1 %d 13V38z" fill="%s"/>' % (w - 13, w - 2, TERM["bar"]),
@@ -139,35 +169,108 @@ def terminal(lines, title):
         out.append('<circle cx="%d" cy="20" r="6" fill="%s"/>' % (24 + 20 * i, c))
     out.append('<text x="%d" y="25" text-anchor="middle" font-family="%s" font-size="13" fill="%s">%s</text>'
                % (w // 2, SANS, TERM["muted"], escape(title)))
-    for n, line in enumerate(lines):
+    for n, (text, colors) in enumerate(rows):
         y = top + lh * n + 14
         parts = []
-        for col, text, color in spans(line):
-            weight = ' font-weight="700"' if color in ("head", "accent") or (n == 0 and col > 0) else ""
-            parts.append('<tspan x="%.1f" fill="%s"%s>%s</tspan>' % (pad + cw * col, TERM[color], weight,
-                                                                      escape(text)))
+        for col, piece, color in runs(text, colors):
+            bold = color in ("head", "accent") or (text.startswith("$ ") and col > 0)
+            parts.append('<tspan x="%.1f" fill="%s"%s>%s</tspan>' % (pad + cw * col, TERM[color],
+                                                                      ' font-weight="700"' if bold else "",
+                                                                      escape(piece)))
         out.append('<text y="%d" font-family="%s" font-size="15" xml:space="preserve" style="%s">%s</text>'
                    % (y, MONO, NO_LIGATURES, "".join(parts)))
     out.append("</svg>")
     return "\n".join(out) + "\n"
 
 
-def block(transcript, command):
-    """The first `$ command` in the demo transcript and its output, up to the blank line after it."""
+def scene(transcript, name):
+    """The lines of one `===== name =====` scene of the demo transcript."""
     lines = transcript.splitlines()
-    start = lines.index("$ " + command)
-    end = lines.index("", start)
-    return lines[start:end]
+    start = lines.index("===== %s =====" % name)
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("===== ")), len(lines))
+    return lines[start + 1:end]
+
+
+def piece(lines, first, drop=None):
+    """The block that starts with the line `first` (up to the next blank line), without the lines that match
+    `drop`; a cut inside the block shows as `...`."""
+    start = next(i for i, ln in enumerate(lines) if ln == first or ln.startswith(first))
+    end = next((i for i in range(start, len(lines)) if not lines[i]), len(lines))
+    out, cut = [], False
+    for ln in lines[start:end]:
+        if drop and re.search(drop, ln):
+            cut = True
+            continue
+        if cut and out:
+            out.append("  ..." if ln.startswith("  ") else "...")
+        cut = False
+        out.append(ln)
+    return out
+
+
+NOISE = r"^  \| |^  --- output|^  \(full log|^\[sci\] "
+# The README's terminal pictures: file, scene, the blocks to show (first line, lines to drop), alt text.
+PICTURES = [
+    ("caught.svg", "T1: the agent hides the failing test",
+     [("# the agent edits", None), ("$ .sci/sci check", NOISE + "|^GUARD FIX"),
+      ("$ .sci/sci restore", r"^Your previous|^Next:|^\[sci\] ")],
+     "Terminal: the agent adds #[ignore] to a failing Rust test; the tests pass, but sci's check counts as FAIL "
+     "with LOCKED TESTS CHANGED: src/stats.rs: skip/xfail added: #[ignore = \"flaky\"]; restore --paths puts "
+     "back only the tests and leaves the code unchanged."),
+    ("stop.svg", "T1: fix 3",
+     [("$ .sci/sci check", r"^  \| (?!left|right)|^  --- output|^  \(full log|^  summary:|^\[sci\] ")],
+     "Terminal: the third failed fix; sci prints STOP: 3 failed fix attempts in a row, do not edit code now, "
+     "and lists the steps: write hypotheses, test them with an experiment, refute or confirm."),
+    ("evidence.svg", "T1: STOP, guesses and an experiment",
+     [("$ .sci/sci run", r"^Cite it|^STOP still"), ("$ .sci/sci hyp refute", r"^\[sci\] "),
+      ("$ .sci/sci hyp confirm", r"^\[sci\] ")],
+     "Terminal: an experiment through sci shows that rounding the rank down picks the wrong sample; H1 is "
+     "refuted, the STOP clears, and H2 (the rank must be rounded up) is confirmed."),
+    ("resume.svg", "the agent's context is compacted", [("$ .sci/sci resume", None)],
+     "Terminal: .sci/sci resume prints the objective, both tasks with T1 active, its test command, files, the "
+     "locked tests, the last check (FAIL, strikes 1/3), the failing test, a note, the baseline and NEXT."),
+    ("regression.svg", "T2",
+     [("$ .sci/sci verify", NOISE + r"|^  summary:"), ("# the agent edits src/stats.rs: rank() rounds up", None),
+      ("$ .sci/sci check", r"^  \| |^  summary:|^\[sci\] ")],
+     "Terminal: verify for T2 fails: REGRESSION, your change broke T1's tests "
+     "(stats::tests::p99_of_10_samples_is_the_slowest); after the fix, check reruns only that test and it passes."),
+]
+
+
+def picture(transcript, scene_name, blocks):
+    lines, out = scene(transcript, scene_name), []
+    for first, drop in blocks:
+        # the second `$ .sci/sci check` of a scene follows the edit named before it
+        start = 0
+        if out and first.startswith("$ "):
+            prev = out[-1] if out[-1] else out[-2]
+            idx = [i for i, ln in enumerate(lines) if ln == prev]
+            start = idx[-1] if idx else 0
+        if out:
+            out.append("")
+        out += piece(lines[start:], first, drop)
+    return out
+
+
+# Values that differ in every run of the demo: durations, thread ids, timestamps and commit hashes.
+VOLATILE = [(r"\b\d+(\.\d+)?s\b", "<secs>"), (r"\(\d{4,}\)", "(<id>)"), (r"-\d{9,}\.patch", "-<time>.patch"),
+            (r"\b[0-9a-f]{7,10}\b", "<hash>")]
+
+
+def stable(line):
+    for pat, rep in VOLATILE:
+        line = re.sub(pat, rep, line)
+    return line
 
 
 def unquoted(readme, transcript):
     """Lines of the README's console blocks that the demo did not print (`...` marks a cut)."""
-    printed = set(transcript.splitlines())
+    printed = set(stable(ln) for ln in transcript.splitlines())
     missing, inside = [], False
     for line in readme.splitlines():
         if line.startswith("```"):
             inside = line == "```console"
-        elif inside and line.strip() not in ("", "...") and line not in printed:
+        elif inside and line.strip() not in ("", "...") and stable(line) not in printed:
             missing.append(line)
     return missing
 
@@ -178,7 +281,10 @@ def main(argv):
     if len(argv) < 2:
         return 0
     transcript = Path(argv[1]).read_text(encoding="utf-8")
-    (HERE / "resume.svg").write_text(terminal(block(transcript, ".sci/sci resume"), "~/bills"), encoding="utf-8")
+    (HERE / "session.txt").write_text(transcript.lstrip("\n"), encoding="utf-8")
+    for name, scene_name, blocks, label in PICTURES:
+        lines = picture(transcript, scene_name, blocks)
+        (HERE / name).write_text(terminal(lines, "~/latency", label), encoding="utf-8")
     missing = unquoted((HERE.parent.parent / "README.md").read_text(encoding="utf-8"), transcript)
     for line in missing:
         print("README quotes a line the demo did not print: " + line)
