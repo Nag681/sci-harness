@@ -1,55 +1,39 @@
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset=".github/readme/hero-dark.svg">
-    <img alt="Sci-Harness, for coding agents. Give your agent a big coding job. Get it done right." src=".github/readme/hero-light.svg" width="100%">
-  </picture>
-</p>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/readme/hero-dark.svg">
+  <img alt="Sci-Harness, for coding agents. Give your agent a big coding job. Get it done right." src=".github/readme/hero-light.svg" width="100%">
+</picture>
 
-<p align="center">
-  A free add-on for coding agents like Claude Code, Codex and Gemini.<br>
-  It keeps them honest and on track through long jobs.
-</p>
+A free add-on for coding agents like Claude Code, Codex and Gemini. It keeps them honest and on track through
+long jobs.
 
-<p align="center">
-  <a href="#get-started"><b>Get started</b></a> &nbsp;·&nbsp; <a href="#good-to-know">Good to know</a> &nbsp;·&nbsp; <a href="docs/how-it-works.md">For developers</a>
-</p>
-
-<br>
+**[Get started](#get-started)** · [Good to know](#good-to-know) · [For developers](docs/how-it-works.md)
 
 ## Big jobs are where agents slip
 
-You ask your agent to build something big. It starts strong. A few hours in:
+Your agent starts strong, then slips a few hours in. Sci-Harness works like a climber's harness: every finished
+step is checked and saved, so a slip costs one step, not the whole job.
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset=".github/readme/slips-dark.svg">
-  <img alt="It forgets the plan: long chats get trimmed, and the details go with them. It fakes the fix: when a check fails, it quietly makes the check easier. It goes in circles: the same broken fix, again and again. It breaks what worked: a new change quietly undoes an old one." src=".github/readme/slips-light.svg" width="100%">
-</picture>
-
-## Sci-Harness catches every slip
-
-Climbers clip into a harness so that a slip never sends them to the bottom. Sci-Harness does the same for your
-agent. Every finished step is checked and saved, so a mistake costs one step, not the whole job.
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset=".github/readme/catches-dark.svg">
-  <img alt="The plan is written down: after any break, your agent picks up exactly where it left off. The checks are locked: making a check easier counts as a failure. Three misses, then it stops: it has to find the cause before it tries again. Every step is re-checked: old features are tested again before anything is saved." src=".github/readme/catches-light.svg" width="100%">
-</picture>
+| Without Sci&#8209;Harness | With Sci&#8209;Harness |
+| --- | --- |
+| ❌ **It forgets the plan.** Long chats get trimmed, and the details go with them. | ✅ **The plan is written down.** After any break, your agent picks up where it left off. |
+| ❌ **It fakes the fix.** When a check fails, it quietly makes the check easier. | ✅ **The checks are locked.** Making a check easier counts as a failure. |
+| ❌ **It goes in circles.** The same broken fix, again and again. | ✅ **Three misses, then it stops.** It has to find the cause before it tries again. |
+| ❌ **It breaks what worked.** A new change quietly undoes an old one. | ✅ **Every step is re-checked.** Old features are tested again before anything is saved. |
 
 ## One evening, start to finish
 
 At 6 PM you ask your agent for a shopping cart, then step away.
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset=".github/readme/story-dark.svg">
-  <img alt="6:00 PM: the plan is written, four steps, each with a check that proves it works. 6:40 PM: step 1 is saved; items go into the cart. 7:15 PM: a fake fix is caught; a check was made easier, and it is put back as it was. 8:05 PM: three misses, then a stop; it stops guessing and tests its ideas to find the cause. 8:30 PM: step 2 is saved; prices and totals add up. 9:10 PM: the chat is trimmed; it reads its notes and picks up exactly where it left off. 10:20 PM: step 3 breaks step 1; caught before it is saved, then fixed. 11:40 PM: done, with a report: 4 steps saved, 4 slips caught and 1 question for you." src=".github/readme/story-light.svg" width="100%">
-</picture>
-
-## How you use it
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset=".github/readme/steps-dark.svg">
-  <img alt="1. Describe the job: one sentence to your agent is all it takes. 2. Your agent builds: step by step, each one checked and saved. 3. You get the result: finished work and a short report to read." src=".github/readme/steps-light.svg" width="100%">
-</picture>
+| When | What happens |
+| --- | --- |
+| 6:00&nbsp;PM | 📝 **The plan is written.** Four steps, each with a check that proves it works. |
+| 6:40&nbsp;PM | ✅ **Step 1 is saved.** Items go into the cart. |
+| 7:15&nbsp;PM | ⚠️ **A fake fix is caught.** A check was made easier, so it is put back as it was. |
+| 8:05&nbsp;PM | ⚠️ **Three misses, then a stop.** It stops guessing and tests its ideas to find the cause. |
+| 8:30&nbsp;PM | ✅ **Step 2 is saved.** Prices and totals add up. |
+| 9:10&nbsp;PM | ⚠️ **The chat is trimmed.** It reads its notes and picks up where it left off. |
+| 10:20&nbsp;PM | ⚠️ **Step 3 breaks step 1.** Caught before it is saved, then fixed. |
+| 11:40&nbsp;PM | 🏁 **Done.** 4 steps saved, 4 slips caught, and a short report with 1 question for you. |
 
 ## Get started
 
@@ -71,19 +55,22 @@ irm https://raw.githubusercontent.com/Nag681/sci-harness/main/install.ps1 | iex
 
 > **`/sci add a shopping cart to my store`**
 
+**3. Read the report.** When the job is done, your agent tells you what changed and what needs you.
+
 <sub>No `/` commands in your agent? Write “Use the sci skill to …” instead. Sci-Harness needs Python and Git on
 your computer.</sub>
 
 ## Good to know
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset=".github/readme/facts-dark.svg">
-  <img alt="No coding needed: you describe the job, your agent does the rest. Stays on your computer: your code is never sent anywhere. Free and open source: no account, no sign-up, MIT license. Fine for messy projects: old problems are noted first, so only new ones count. Barely slower: it re-checks only what changed. Works with your agent: Claude Code, Codex, Gemini CLI, Antigravity, OpenCode and pi." src=".github/readme/facts-light.svg" width="100%">
-</picture>
+- **No coding needed.** You describe the job. Your agent does the rest.
+- **Stays on your computer.** Your code is never sent anywhere.
+- **Free and open source.** No account, no sign-up. MIT license.
+- **Fine for messy projects.** Old problems are noted first, so only new ones count.
+- **Barely slower.** It re-checks only what changed.
+- **Works with your agent.** Claude Code, Codex, Gemini CLI, Antigravity, OpenCode and pi.
 
 <details>
 <summary><b>Update or remove it</b></summary>
-<br>
 
 To update, paste the install line again. To remove it:
 
@@ -97,8 +84,4 @@ $env:SCI_ARGS = "--uninstall"; irm https://raw.githubusercontent.com/Nag681/sci-
 
 </details>
 
-<br>
-
-<p align="center">
-  <sub>Curious how it works under the hood? Read the <a href="docs/how-it-works.md">developer guide</a>. · <a href="LICENSE">MIT license</a></sub>
-</p>
+<sub>How it works under the hood: the [developer guide](docs/how-it-works.md). · [MIT license](LICENSE)</sub>
