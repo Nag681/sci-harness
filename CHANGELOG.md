@@ -8,12 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
-- The README now shows what it left out. Another agent opened in the same folder picks up the same plan, locked
-  checks and ruled-out causes, even a test run that was still going. The report lists every rule the agent bent.
-  Questions do not stop the job, test runs outlive the agent, numerical results are saved before a change, and
-  each step is one commit. Three lines say more exactly what happens: after STOP the agent must test the cause,
-  and the report says when it did not; sci skips checks that passed on the same code; sci itself never sends
-  code anywhere.
+- The README is a landing page: a headline and the one-line install at the top, the four slips Sci-Harness
+  catches, switching agents mid-job (another agent in the same folder picks up the same plan, locked checks and
+  ruled-out causes, even a test run that was still going), and everything else it does: the list of every rule
+  the agent bent, questions that do not stop the job, test runs that outlive the agent, numerical results saved
+  before a change, undo, and one commit per step. Every line was checked against what sci does, and three now say
+  it more exactly: after STOP the agent must test the cause and the report says when it did not, sci skips checks
+  that passed on the same code, and sci itself never sends code anywhere.
 
 ## [3.4.2] - 2026-11-22
 
